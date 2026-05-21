@@ -261,7 +261,7 @@ class BumpCommand extends Command
                 // Create MR
                 try {
                     $client->mergeRequests()->create($projectId, $branch, $baseBranch, "Bump: $package to $version", [
-                        'description'          => "## Description\n\nUpdate `$package` to `$version`.",
+                        'description'          => "## 🤖 Automated dependency update\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### What changed\n\nUpdated `$package` from its previous version to `$version` in `composer.json`" . ($lockChanged ? " and `composer.lock`" : "") . ".\n\n### Why\n\nThis is a routine dependency bump. Please review the diff and make sure the CI passes before merging.",
                         'remove_source_branch' => true,
                     ]);
                     $output->writeln('  MR created successfully.');
