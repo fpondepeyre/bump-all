@@ -1,12 +1,12 @@
 {
-    "name": "captainjojo/bump-all",
-    "description": "Create bump MR for your GitLab group when you need update package composer",
-    "type": "library",
+    "name": "fpondepeyre/bump-all",
+    "description": "Update a Composer dependency across all projects in a GitLab group and open a MR for each",
+    "type": "project",
+    "license": "MIT",
     "authors": [
         {
-            "name": "CaptainJojo",
-            "email": "jonathan.jalouzot@gmail.com",
-            "homepage": "https://github.com/CaptainJojo"
+            "name": "Florian Pondepeyre",
+            "homepage": "https://github.com/fpondepeyre"
         }
     ],
     "minimum-stability": "stable",

@@ -140,9 +140,9 @@ class BumpCommand extends Command
                 }
 
                 // Clone and run composer update
-                $tmpDir  = '/tmp/bump-' . $projectPath;
-                $gitHost = parse_url($gitlabUrl, PHP_URL_HOST);
-                $composerAuth = json_encode(['gitlab-token' => [$gitHost => $token]]);
+                $tmpDir       = '/tmp/bump-' . $projectPath;
+                $gitHost      = parse_url($gitlabUrl, PHP_URL_HOST);
+                $authFile     = $tmpDir . '-auth.json';
 
                 exec('rm -rf ' . escapeshellarg($tmpDir));
 
@@ -157,6 +157,10 @@ class BumpCommand extends Command
                     continue;
                 }
 
+                // Write COMPOSER_AUTH to a temp file to avoid token exposure in /proc
+                file_put_contents($authFile, json_encode(['gitlab-token' => [$gitHost => $token]]));
+                chmod($authFile, 0600);
+
                 file_put_contents(
                     $tmpDir . '/composer.json',
                     json_encode($composer, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n"
@@ -169,7 +173,7 @@ class BumpCommand extends Command
 
                 $composerOut = [];
                 exec(
-                    'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg($composerAuth) . ' composer update --no-interaction --no-scripts 2>&1',
+                    'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update --no-interaction --no-scripts 2>&1',
                     $composerOut,
                     $composerRet
                 );
@@ -191,7 +195,7 @@ class BumpCommand extends Command
                         $output->writeln('  Ignoring missing extensions: ' . implode(', ', array_keys($missingExts)));
                         $composerOut = [];
                         exec(
-                            'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg($composerAuth) . ' composer update --no-interaction --no-scripts ' . $ignoreFlags . ' 2>&1',
+                            'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update --no-interaction --no-scripts ' . $ignoreFlags . ' 2>&1',
                             $composerOut,
                             $composerRet
                         );
@@ -202,6 +206,7 @@ class BumpCommand extends Command
                     $output->writeln('  <error>composer update failed:</error>');
                     $output->writeln(implode("\n", $composerOut));
                     exec('rm -rf ' . escapeshellarg($tmpDir));
+                    @unlink($authFile);
                     continue;
                 }
 
@@ -211,6 +216,7 @@ class BumpCommand extends Command
                     : null;
 
                 exec('rm -rf ' . escapeshellarg($tmpDir));
+                @unlink($authFile);
 
                 $lockChanged = $newComposerLock !== null && $newComposerLock !== $composerLockContent;
 

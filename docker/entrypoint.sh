@@ -3,7 +3,10 @@ set -e
 
 # Load .env if present
 if [ -f /app/.env ]; then
-    export $(grep -v '^#' /app/.env | xargs)
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        export "$line"
+    done < /app/.env
 fi
 
 exec php /app/app/console composer:update "$@"
