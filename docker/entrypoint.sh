@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
+set -e
 
-# set composer token for github
-php -n /usr/local/bin/composer config -g github-oauth.github.com "$GITHUB_TOKEN"
+# Load .env if present
+if [ -f /app/.env ]; then
+    export $(grep -v '^#' /app/.env | xargs)
+fi
 
-# force https
-php -n /usr/local/bin/composer config --global github-protocols https
-
-if [ "$1" = "bumper" ]; then
-    # run composer
-    php app/console composer:update "$GITHUB_TOKEN" "${@:2}"
-else
-    # Run initial command from arguments
-    "$@"
-fi;
+exec php /app/app/console composer:update "$@"

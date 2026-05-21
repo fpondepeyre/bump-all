@@ -1,23 +1,16 @@
-FROM loliee/docker-php:5.6
-MAINTAINER Arnaud VEBER <arnaud@veber.io>
+FROM php:8.3-cli
 
-# install composer
-RUN curl -sS https://getcomposer.org/installer | php \
-    && mv composer.phar /usr/local/bin/composer \
-    && chmod +x /usr/local/bin/composer
+# Install git and composer
+RUN apt-get update && apt-get install -y git unzip && rm -rf /var/lib/apt/lists/*
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
-# create target directory
-RUN mkdir -p /usr/src/app
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# copy application
-COPY ./ /usr/src/app/
+COPY . /app/
 
-# install dependencies
-RUN php -n -dmemory_limit=-1 /usr/local/bin/composer install
+RUN composer install --no-dev --no-interaction
 
-# entrypoint
-ADD docker/entrypoint.sh /usr/src/entrypoint.sh
-RUN chmod +x /usr/src/entrypoint.sh
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-ENTRYPOINT ["/usr/src/entrypoint.sh"]
+ENTRYPOINT ["/entrypoint.sh"]
