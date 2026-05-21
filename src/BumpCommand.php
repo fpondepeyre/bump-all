@@ -20,6 +20,7 @@ class BumpCommand extends Command
         $this->addOption('base-branch', null, InputOption::VALUE_OPTIONAL, 'Base branch to update and target for the MR (or GITLAB_BASE_BRANCH env var, default: master)');
         $this->addOption('project', null, InputOption::VALUE_OPTIONAL, 'Restrict to a single project name or path (useful for testing)');
         $this->addOption('php-version', null, InputOption::VALUE_OPTIONAL, 'PHP version to use for dependency resolution — should match your CI (or COMPOSER_PHP_VERSION env var)');
+        $this->addOption('add-missing', null, InputOption::VALUE_NONE, 'Also add packages that are not yet present in composer.json (upsert mode). Default: only update existing packages.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -30,6 +31,7 @@ class BumpCommand extends Command
         $baseBranch = $input->getOption('base-branch') ?: ($_ENV['GITLAB_BASE_BRANCH']    ?? 'master');
         $filterProject = $input->getOption('project');
         $phpVersion    = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
+        $addMissing    = $input->getOption('add-missing');
 
         // Parse packages: each arg is "vendor/name:version"
         $packages = [];
@@ -113,14 +115,19 @@ class BumpCommand extends Command
                 $composer     = json_decode(base64_decode($composerFile['content']), true);
 
                 $matchedPackages = [];
+                $addedPackages   = [];
                 foreach ($packages as $package => $version) {
                     if (isset($composer['require'][$package])) {
                         $composer['require'][$package] = $version;
                         $matchedPackages[$package] = $version;
-                    }
-                    if (isset($composer['require-dev'][$package])) {
+                    } elseif (isset($composer['require-dev'][$package])) {
                         $composer['require-dev'][$package] = $version;
                         $matchedPackages[$package] = $version;
+                    } elseif ($addMissing) {
+                        // Package not present: add it to require
+                        $composer['require'][$package] = $version;
+                        $matchedPackages[$package] = $version;
+                        $addedPackages[$package]   = $version;
                     }
                 }
 
@@ -129,8 +136,16 @@ class BumpCommand extends Command
                     continue;
                 }
 
+                $updatedOnly = array_diff_key($matchedPackages, $addedPackages);
+                $parts = [];
+                if (!empty($updatedOnly)) {
+                    $parts[] = 'updated: ' . implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($updatedOnly), $updatedOnly));
+                }
+                if (!empty($addedPackages)) {
+                    $parts[] = 'added: ' . implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($addedPackages), $addedPackages));
+                }
                 $matchedSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($matchedPackages), $matchedPackages));
-                $output->writeln('updating ' . $matchedSummary . ' ...');
+                $output->writeln(implode(' | ', $parts) . ' ...');
 
                 // Fetch composer.lock
                 $composerLockSha     = null;

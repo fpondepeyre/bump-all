@@ -89,12 +89,27 @@ php app/console composer:update "vendor/package:^3.0" -v
 | `--base-branch` | `GITLAB_BASE_BRANCH`   | Branch to update and open MR against (default: `master`) |
 | `--project`     | —                      | Restrict to one project by name or path                  |
 | `--php-version` | `COMPOSER_PHP_VERSION` | Pin PHP version for `composer update` resolution         |
+| `--add-missing` | —                      | Add packages not yet present in `composer.json` (upsert mode). Default: skip missing. |
 
 > All options can be set in `.env` — CLI flags override env vars.
 
+# Update modes
+
+By default, `bump-all` only **updates packages that already exist** in `composer.json` — it never adds new ones.
+
+Use `--add-missing` to also **add packages** that are not yet present:
+
+```bash
+# Only updates projects that already have symfony/http-client
+php app/console composer:update "symfony/http-client:7.4.*"
+
+# Adds symfony/http-client to every project, even those that don't have it yet
+php app/console composer:update "symfony/http-client:7.4.*" --add-missing
+```
+
 ---
 
-## Tips
+
 
 **Private GitLab packages** — authentication is handled automatically via `GITLAB_TOKEN`.
 
