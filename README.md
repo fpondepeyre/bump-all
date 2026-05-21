@@ -69,39 +69,63 @@ Each package is passed as `vendor/name:version`. You can pass as many as you nee
 
 ```bash
 # Update a single package
-php app/console composer:update "vendor/package:^3.0"
+docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
 
-# Update multiple packages at once (e.g. migrate from Symfony 6.4 → 7.4)
-php app/console composer:update \
+# Update multiple specific packages
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   "symfony/console:7.4.*" \
-  "symfony/framework-bundle:7.4.*" \
-  "symfony/amqp-messenger:7.4.*"
+  "symfony/framework-bundle:7.4.*"
 
-# Target a specific branch
-php app/console composer:update "symfony/http-client:7.4.*" \
-  --base-branch="release/2025.1.0"
+# Migrate ALL symfony/* packages to 7.4 across every project in your group
+# Some symfony packages have their own versioning — exclude them explicitly
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/*:7.4.*" \
+  --exclude="symfony/flex" \
+  --exclude="symfony/monolog-bundle" \
+  --exclude="symfony/maker-bundle" \
+  --exclude="symfony/phpunit-bridge" \
+  --base-branch="release/2026.7.4"
 
-# Test on a single project before running on the whole group
-php app/console composer:update "symfony/http-client:7.4.*" \
-  --base-branch="release/2025.1.0" \
+# Test on a single project first before running on the whole group
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/*:7.4.*" \
+  --exclude="symfony/flex" \
+  --exclude="symfony/monolog-bundle" \
+  --exclude="symfony/maker-bundle" \
+  --exclude="symfony/phpunit-bridge" \
+  --base-branch="release/2026.7.4" \
   --project="my-service"
 
+# Target a specific branch
+docker run --rm -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*" \
+  --base-branch="release/2025.1.0"
+
 # Show every project scanned (verbose)
-php app/console composer:update "vendor/package:^3.0" -v
+docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0" -v
 ```
+
+> **Note on `symfony/*` wildcard**: some Symfony ecosystem packages have **independent version numbers** and must be excluded:
+> - `symfony/flex` → 2.x
+> - `symfony/monolog-bundle` → 3.x / 4.x
+> - `symfony/maker-bundle` → 1.x
+> - `symfony/phpunit-bridge` → follows its own cycle
+>
+> Use `--exclude` for each of them when using the `symfony/*` wildcard.
 
 ### All options
 
-| Option          | Env var                | Description                                              |
-|-----------------|------------------------|----------------------------------------------------------|
-| `--token`, `-t` | `GITLAB_TOKEN`         | GitLab private token                                     |
-| `--group`, `-g` | `GITLAB_GROUP`         | GitLab group path or numeric ID                          |
-| `--gitlab-url`  | `GITLAB_URL`           | GitLab instance URL                                      |
-| `--base-branch` | `GITLAB_BASE_BRANCH`   | Branch to update and open MR against (default: `master`) |
-| `--project`     | —                      | Restrict to one project by name or path                  |
-| `--php-version` | `COMPOSER_PHP_VERSION` | Pin PHP version for `composer update` resolution         |
-| `--add-missing` | —                      | Add packages not yet present in `composer.json` (upsert mode). Default: skip missing. |
+| Option                    | Env var                | Description                                              |
+|---------------------------|------------------------|----------------------------------------------------------|
+| `--token`, `-t`           | `GITLAB_TOKEN`         | GitLab private token                                     |
+| `--group`, `-g`           | `GITLAB_GROUP`         | GitLab group path or numeric ID                          |
+| `--gitlab-url`            | `GITLAB_URL`           | GitLab instance URL                                      |
+| `--base-branch`           | `GITLAB_BASE_BRANCH`   | Branch to update and open MR against (default: `master`) |
+| `--project`               | —                      | Restrict to one project by name or path                  |
+| `--php-version`           | `COMPOSER_PHP_VERSION` | Pin PHP version for `composer update` resolution         |
+| `--add-missing`           | —                      | Add packages not yet present in `composer.json` (upsert mode) |
+| `--exclude`               | —                      | Exclude a package from wildcard matching (repeatable)    |
+| `--with-all-dependencies` | —                      | Allow composer to upgrade/downgrade transitive dependencies (`-W`) |
 
 > All options can be set in `.env` — CLI flags override env vars.
 
@@ -121,11 +145,11 @@ php app/console composer:update "symfony/http-client:7.4.*" --add-missing
 
 ---
 
-
+## Tips
 
 **Private GitLab packages** — authentication is handled automatically via `GITLAB_TOKEN`.
 
-**Missing PHP extensions** (e.g. `ext-rdkafka`, `ext-grpc`) — if `composer update` fails because of extensions not installed locally, the tool retries automatically ignoring only those extensions. The PHP version constraint is always preserved.
+**Missing PHP extensions** — the Docker image ships with `ext-rdkafka`, `ext-amqp`, and `ext-grpc` pre-installed. If running outside Docker and `composer update` fails due to a missing extension, the tool retries automatically ignoring only those extensions. The PHP version constraint is always preserved.
 
 **PHP version mismatch** — always set `COMPOSER_PHP_VERSION` to match your CI. Otherwise the lock file may include packages incompatible with your CI's PHP version.
 
@@ -135,15 +159,19 @@ php app/console composer:update "symfony/http-client:7.4.*" --add-missing
 
 ## Docker
 
+The Docker image includes `ext-rdkafka`, `ext-amqp`, and `ext-grpc` so that `composer update` resolves dependencies correctly without needing to ignore platform requirements.
+
 ```bash
 docker build -t bump-all .
 
 # Single package
 docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
 
-# Multiple packages
+# All symfony/* packages (wildcard)
 docker run --rm -v $(pwd)/.env:/app/.env bump-all \
-  "symfony/http-client:7.4.*" \
-  "symfony/console:7.4.*" \
-  "symfony/framework-bundle:7.4.*"
+  "symfony/*:7.4.*" \
+  --exclude="symfony/flex" \
+  --exclude="symfony/monolog-bundle" \
+  --exclude="symfony/maker-bundle" \
+  --base-branch="release/2026.7.4"
 ```
