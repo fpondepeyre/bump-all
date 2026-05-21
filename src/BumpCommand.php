@@ -22,6 +22,7 @@ class BumpCommand extends Command
         $this->addOption('php-version', null, InputOption::VALUE_OPTIONAL, 'PHP version to use for dependency resolution — should match your CI (or COMPOSER_PHP_VERSION env var)');
         $this->addOption('add-missing', null, InputOption::VALUE_NONE, 'Also add packages that are not yet present in composer.json (upsert mode). Default: only update existing packages.');
         $this->addOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Pass --with-all-dependencies to composer update, allowing upgrades of transitive dependencies.');
+        $this->addOption('exclude', null, InputOption::VALUE_IS_ARRAY | InputOption::VALUE_REQUIRED, 'Exclude a package from being updated (can be repeated, e.g. --exclude=symfony/flex --exclude=symfony/monolog-bundle).');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -34,6 +35,7 @@ class BumpCommand extends Command
         $phpVersion         = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
         $addMissing         = $input->getOption('add-missing');
         $withAllDeps        = $input->getOption('with-all-dependencies');
+        $excludes           = $input->getOption('exclude');
 
         // Parse packages: each arg is "vendor/name:version"
         $packages = [];
@@ -132,6 +134,9 @@ class BumpCommand extends Command
                         // Match all existing packages against the wildcard pattern
                         foreach ($allExisting as $existing) {
                             if (!fnmatch($pattern, $existing)) {
+                                continue;
+                            }
+                            if (in_array($existing, $excludes, true)) {
                                 continue;
                             }
                             if (isset($composer['require'][$existing])) {
