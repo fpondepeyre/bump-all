@@ -1,6 +1,6 @@
 # bump-all
 
-Update a Composer dependency across every project in a GitLab group and open a **Merge Request** for each one — in a single command.
+Update one or more Composer dependencies across every project in a GitLab group and open a **Merge Request** for each — in a single command.
 
 ---
 
@@ -8,8 +8,8 @@ Update a Composer dependency across every project in a GitLab group and open a *
 
 For each project in your GitLab group, `bump-all`:
 
-1. Checks if the target package exists in `composer.json`
-2. Updates its version and runs `composer update` locally
+1. Checks if any of the target packages exist in `composer.json`
+2. Updates their versions and runs `composer update` locally
 3. Pushes a new branch with the updated `composer.json` + `composer.lock`
 4. Opens a Merge Request targeting your base branch
 
@@ -48,26 +48,35 @@ COMPOSER_PHP_VERSION=8.3.0               # PHP version used in your CI
 ## Usage
 
 ```bash
-php app/console composer:update <package> <version> [options]
+php app/console composer:update <vendor/name:version> [<vendor/name:version> ...] [options]
 ```
 
-### Basic examples
+Each package is passed as `vendor/name:version`. You can pass as many as you need.
+
+### Examples
 
 ```bash
-# Update a package to a specific version
-php app/console composer:update "vendor/package" "^3.0"
+# Update a single package
+php app/console composer:update "vendor/package:^3.0"
 
-# Update on a release branch instead of master
-php app/console composer:update "symfony/http-client" "7.4.*" \
+# Update multiple packages at once (e.g. migrate from Symfony 6.4 → 7.4)
+php app/console composer:update \
+  "symfony/http-client:7.4.*" \
+  "symfony/console:7.4.*" \
+  "symfony/framework-bundle:7.4.*" \
+  "symfony/amqp-messenger:7.4.*"
+
+# Target a specific branch
+php app/console composer:update "symfony/http-client:7.4.*" \
   --base-branch="release/2025.1.0"
 
 # Test on a single project before running on the whole group
-php app/console composer:update "symfony/http-client" "7.4.*" \
+php app/console composer:update "symfony/http-client:7.4.*" \
   --base-branch="release/2025.1.0" \
   --project="my-service"
 
 # Show every project scanned (verbose)
-php app/console composer:update "vendor/package" "^3.0" -v
+php app/console composer:update "vendor/package:^3.0" -v
 ```
 
 ### All options
@@ -102,6 +111,12 @@ php app/console composer:update "vendor/package" "^3.0" -v
 ```bash
 docker build -t bump-all .
 
-# Pass your .env into the container
-docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package" "^3.0"
+# Single package
+docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
+
+# Multiple packages
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  "symfony/console:7.4.*" \
+  "symfony/framework-bundle:7.4.*"
 ```

@@ -12,9 +12,8 @@ class BumpCommand extends Command
     protected function configure()
     {
         $this->setName('composer:update');
-        $this->setDescription('Update a Composer dependency across all projects in a GitLab group and open a MR for each');
-        $this->addArgument('package', InputArgument::REQUIRED, 'Composer package name (e.g. vendor/package)');
-        $this->addArgument('version', InputArgument::REQUIRED, 'New version constraint (e.g. ^2.0 or 7.4.*)');
+        $this->setDescription('Update Composer dependencies across all projects in a GitLab group and open a MR for each');
+        $this->addArgument('packages', InputArgument::IS_ARRAY | InputArgument::REQUIRED, 'Packages to update, format: vendor/name:version (e.g. symfony/http-client:7.4.* symfony/console:7.4.*)');
         $this->addOption('token', 't', InputOption::VALUE_OPTIONAL, 'GitLab private token (or GITLAB_TOKEN env var)');
         $this->addOption('group', 'g', InputOption::VALUE_OPTIONAL, 'GitLab group path or ID (or GITLAB_GROUP env var)');
         $this->addOption('gitlab-url', null, InputOption::VALUE_OPTIONAL, 'GitLab instance URL (or GITLAB_URL env var)');
@@ -27,12 +26,21 @@ class BumpCommand extends Command
     {
         $token      = $input->getOption('token')       ?: ($_ENV['GITLAB_TOKEN']          ?? null);
         $group      = $input->getOption('group')       ?: ($_ENV['GITLAB_GROUP']          ?? null);
-        $package    = $input->getArgument('package');
-        $version    = $input->getArgument('version');
         $gitlabUrl  = $input->getOption('gitlab-url')  ?: ($_ENV['GITLAB_URL']            ?? null);
         $baseBranch = $input->getOption('base-branch') ?: ($_ENV['GITLAB_BASE_BRANCH']    ?? 'master');
         $filterProject = $input->getOption('project');
         $phpVersion    = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
+
+        // Parse packages: each arg is "vendor/name:version"
+        $packages = [];
+        foreach ($input->getArgument('packages') as $arg) {
+            if (!str_contains($arg, ':')) {
+                $output->writeln("<error>Invalid package format '$arg'. Expected vendor/name:version (e.g. symfony/http-client:7.4.*)</error>");
+                return Command::FAILURE;
+            }
+            [$name, $version] = explode(':', $arg, 2);
+            $packages[$name] = $version;
+        }
 
         if (!$token) {
             $output->writeln('<error>GitLab token is required. Use --token or set GITLAB_TOKEN in .env</error>');
@@ -52,7 +60,8 @@ class BumpCommand extends Command
         $client->authenticate($token, Client::AUTH_HTTP_TOKEN);
 
         $output->writeln("Scanning group <info>$group</info> on <info>$gitlabUrl</info>");
-        $output->writeln("Package: <info>$package</info>  →  <info>$version</info>  (branch: <info>$baseBranch</info>)");
+        $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
+        $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
         if ($filterProject) {
             $output->writeln("Filtering on project: <info>$filterProject</info>");
         }
@@ -102,22 +111,26 @@ class BumpCommand extends Command
                 }
 
                 $composer     = json_decode(base64_decode($composerFile['content']), true);
-                $inRequire    = isset($composer['require'][$package]);
-                $inRequireDev = isset($composer['require-dev'][$package]);
 
-                if (!$inRequire && !$inRequireDev) {
-                    $output->writeln('package not found, skipping.');
+                $matchedPackages = [];
+                foreach ($packages as $package => $version) {
+                    if (isset($composer['require'][$package])) {
+                        $composer['require'][$package] = $version;
+                        $matchedPackages[$package] = $version;
+                    }
+                    if (isset($composer['require-dev'][$package])) {
+                        $composer['require-dev'][$package] = $version;
+                        $matchedPackages[$package] = $version;
+                    }
+                }
+
+                if (empty($matchedPackages)) {
+                    $output->writeln('no matching packages found, skipping.');
                     continue;
                 }
 
-                $output->writeln('updating ' . $package . ' to ' . $version . ' ...');
-
-                if ($inRequire) {
-                    $composer['require'][$package] = $version;
-                }
-                if ($inRequireDev) {
-                    $composer['require-dev'][$package] = $version;
-                }
+                $matchedSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($matchedPackages), $matchedPackages));
+                $output->writeln('updating ' . $matchedSummary . ' ...');
 
                 // Fetch composer.lock
                 $composerLockSha     = null;
@@ -220,8 +233,19 @@ class BumpCommand extends Command
 
                 $lockChanged = $newComposerLock !== null && $newComposerLock !== $composerLockContent;
 
-                // Create branch (recreate if already exists)
-                $branch = 'bump-' . str_replace('/', '-', $package) . '-' . str_replace('*', 'last', $version);
+                // Create branch name from packages
+                if (count($matchedPackages) === 1) {
+                    $pkgName = array_key_first($matchedPackages);
+                    $pkgVer  = $matchedPackages[$pkgName];
+                    $branch  = 'bump-' . str_replace('/', '-', $pkgName) . '-' . str_replace('*', 'last', $pkgVer);
+                } else {
+                    // Use vendor of first package + count
+                    $firstPkg = array_key_first($matchedPackages);
+                    $vendor   = explode('/', $firstPkg)[0];
+                    $versions = array_unique(array_values($matchedPackages));
+                    $verSlug  = str_replace('*', 'last', implode('-', $versions));
+                    $branch   = 'bump-' . $vendor . '-' . count($matchedPackages) . 'pkgs-' . $verSlug;
+                }
                 try {
                     $client->repositories()->deleteBranch($projectId, $branch);
                 } catch (\Exception $e) {
@@ -240,7 +264,7 @@ class BumpCommand extends Command
                         'file_path'      => 'composer.json',
                         'branch'         => $branch,
                         'content'        => $newComposerJson,
-                        'commit_message' => "bump: update $package to $version (composer.json)",
+                        'commit_message' => "bump: update $matchedSummary (composer.json)",
                         'encoding'       => 'text',
                     ]);
                 } catch (\Exception $e) {
@@ -256,7 +280,7 @@ class BumpCommand extends Command
                             'file_path'      => 'composer.lock',
                             'branch'         => $branch,
                             'content'        => $newComposerLock,
-                            'commit_message' => "bump: update $package to $version (composer.lock)",
+                            'commit_message' => "bump: update $matchedSummary (composer.lock)",
                             'encoding'       => 'text',
                         ]);
                     } catch (\Exception $e) {
@@ -264,10 +288,17 @@ class BumpCommand extends Command
                     }
                 }
 
+                // Build MR title and description
+                $mrTitle       = count($matchedPackages) === 1
+                    ? 'Bump: ' . array_key_first($matchedPackages) . ' to ' . reset($matchedPackages)
+                    : 'Bump: ' . count($matchedPackages) . ' packages (' . implode(', ', array_keys($matchedPackages)) . ')';
+                $pkgList       = implode("\n", array_map(fn($n, $v) => "- `$n` → `$v`", array_keys($matchedPackages), $matchedPackages));
+                $mrDescription = "## 🤖 Automated dependency update\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### What changed\n\n$pkgList\n\nUpdated in `composer.json`" . ($lockChanged ? " and `composer.lock`" : "") . ".\n\n### Why\n\nThis is a routine dependency bump. Please review the diff and make sure the CI passes before merging.";
+
                 // Create MR
                 try {
-                    $client->mergeRequests()->create($projectId, $branch, $baseBranch, "Bump: $package to $version", [
-                        'description'          => "## 🤖 Automated dependency update\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### What changed\n\nUpdated `$package` from its previous version to `$version` in `composer.json`" . ($lockChanged ? " and `composer.lock`" : "") . ".\n\n### Why\n\nThis is a routine dependency bump. Please review the diff and make sure the CI passes before merging.",
+                    $client->mergeRequests()->create($projectId, $branch, $baseBranch, $mrTitle, [
+                        'description'          => $mrDescription,
                         'remove_source_branch' => true,
                     ]);
                     $output->writeln('  MR created successfully.');
