@@ -1,0 +1,38 @@
+{
+    "name": "captainjojo/bump-all",
+    "description": "Create bump MR for your GitLab group when you need update package composer",
+    "type": "library",
+    "authors": [
+        {
+            "name": "CaptainJojo",
+            "email": "jonathan.jalouzot@gmail.com",
+            "homepage": "https://github.com/CaptainJojo"
+        }
+    ],
+    "minimum-stability": "stable",
+    "require": {
+        "php": ">=7.4.0",
+        "symfony/console": "^5.0",
+        "m4tthumphrey/php-gitlab-api": "^11.0",
+        "guzzlehttp/guzzle": "^7.0",
+        "vlucas/phpdotenv": "^5.6"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    }
+}

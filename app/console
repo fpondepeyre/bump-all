@@ -1,0 +1,22 @@
+<?php
+
+/**
+ * @var Composer\Autoload\ClassLoader $loader
+ */
+$loader = require_once __DIR__ . '/../vendor/autoload.php';
+
+// Load .env if present
+$envFile = __DIR__ . '/../.env';
+if (file_exists($envFile)) {
+    $dotenv = Dotenv\Dotenv::createImmutable(dirname($envFile));
+    $dotenv->load();
+}
+
+use Symfony\Component\Console\Application;
+use Symfony\Component\Console\Input\ArgvInput;
+
+$input = new ArgvInput();
+
+$console = new Application();
+$console->add(new BumpCommand());
+$console->run($input);
