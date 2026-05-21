@@ -21,6 +21,7 @@ class BumpCommand extends Command
         $this->addOption('project', null, InputOption::VALUE_OPTIONAL, 'Restrict to a single project name or path (useful for testing)');
         $this->addOption('php-version', null, InputOption::VALUE_OPTIONAL, 'PHP version to use for dependency resolution — should match your CI (or COMPOSER_PHP_VERSION env var)');
         $this->addOption('add-missing', null, InputOption::VALUE_NONE, 'Also add packages that are not yet present in composer.json (upsert mode). Default: only update existing packages.');
+        $this->addOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Pass --with-all-dependencies to composer update, allowing upgrades of transitive dependencies.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -29,9 +30,10 @@ class BumpCommand extends Command
         $group      = $input->getOption('group')       ?: ($_ENV['GITLAB_GROUP']          ?? null);
         $gitlabUrl  = $input->getOption('gitlab-url')  ?: ($_ENV['GITLAB_URL']            ?? null);
         $baseBranch = $input->getOption('base-branch') ?: ($_ENV['GITLAB_BASE_BRANCH']    ?? 'master');
-        $filterProject = $input->getOption('project');
-        $phpVersion    = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
-        $addMissing    = $input->getOption('add-missing');
+        $filterProject      = $input->getOption('project');
+        $phpVersion         = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
+        $addMissing         = $input->getOption('add-missing');
+        $withAllDeps        = $input->getOption('with-all-dependencies');
 
         // Parse packages: each arg is "vendor/name:version"
         $packages = [];
@@ -116,18 +118,41 @@ class BumpCommand extends Command
 
                 $matchedPackages = [];
                 $addedPackages   = [];
-                foreach ($packages as $package => $version) {
-                    if (isset($composer['require'][$package])) {
-                        $composer['require'][$package] = $version;
-                        $matchedPackages[$package] = $version;
-                    } elseif (isset($composer['require-dev'][$package])) {
-                        $composer['require-dev'][$package] = $version;
-                        $matchedPackages[$package] = $version;
-                    } elseif ($addMissing) {
-                        // Package not present: add it to require
-                        $composer['require'][$package] = $version;
-                        $matchedPackages[$package] = $version;
-                        $addedPackages[$package]   = $version;
+
+                // Collect all existing packages from composer.json
+                $allExisting = array_merge(
+                    array_keys($composer['require']     ?? []),
+                    array_keys($composer['require-dev'] ?? [])
+                );
+
+                foreach ($packages as $pattern => $version) {
+                    $isWildcard = str_contains($pattern, '*');
+
+                    if ($isWildcard) {
+                        // Match all existing packages against the wildcard pattern
+                        foreach ($allExisting as $existing) {
+                            if (!fnmatch($pattern, $existing)) {
+                                continue;
+                            }
+                            if (isset($composer['require'][$existing])) {
+                                $composer['require'][$existing] = $version;
+                            } else {
+                                $composer['require-dev'][$existing] = $version;
+                            }
+                            $matchedPackages[$existing] = $version;
+                        }
+                    } else {
+                        if (isset($composer['require'][$pattern])) {
+                            $composer['require'][$pattern] = $version;
+                            $matchedPackages[$pattern] = $version;
+                        } elseif (isset($composer['require-dev'][$pattern])) {
+                            $composer['require-dev'][$pattern] = $version;
+                            $matchedPackages[$pattern] = $version;
+                        } elseif ($addMissing) {
+                            $composer['require'][$pattern] = $version;
+                            $matchedPackages[$pattern] = $version;
+                            $addedPackages[$pattern]   = $version;
+                        }
                     }
                 }
 
@@ -199,9 +224,11 @@ class BumpCommand extends Command
                     exec('cd ' . escapeshellarg($tmpDir) . ' && composer config platform.php ' . escapeshellarg($phpVersion) . ' 2>&1');
                 }
 
+                $composerFlags = '--no-interaction --no-scripts' . ($withAllDeps ? ' --with-all-dependencies' : '');
+
                 $composerOut = [];
                 exec(
-                    'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update --no-interaction --no-scripts 2>&1',
+                    'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' 2>&1',
                     $composerOut,
                     $composerRet
                 );
@@ -223,7 +250,7 @@ class BumpCommand extends Command
                         $output->writeln('  Ignoring missing extensions: ' . implode(', ', array_keys($missingExts)));
                         $composerOut = [];
                         exec(
-                            'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update --no-interaction --no-scripts ' . $ignoreFlags . ' 2>&1',
+                            'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' ' . $ignoreFlags . ' 2>&1',
                             $composerOut,
                             $composerRet
                         );
