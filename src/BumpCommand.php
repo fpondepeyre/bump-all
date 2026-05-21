@@ -166,6 +166,17 @@ class BumpCommand extends Command
                     continue;
                 }
 
+                // Update extra.symfony.require if symfony/* packages were bumped
+                // This field controls Symfony Flex and must match the framework version
+                foreach ($packages as $pattern => $version) {
+                    if (fnmatch('symfony/*', $pattern) && isset($composer['extra']['symfony']['require'])) {
+                        $old = $composer['extra']['symfony']['require'];
+                        $composer['extra']['symfony']['require'] = $version;
+                        $output->writeln("  extra.symfony.require: $old → $version");
+                        break;
+                    }
+                }
+
                 $updatedOnly = array_diff_key($matchedPackages, $addedPackages);
                 $parts = [];
                 if (!empty($updatedOnly)) {
