@@ -18,7 +18,19 @@ For each project in your GitLab group, `bump-all`:
 ## Requirements
 
 - PHP >= 7.4 + Composer + Git installed locally
-- A GitLab private token with `api` scope
+- A GitLab personal access token with **`api`** scope
+
+### Creating a GitLab token
+
+1. Go to **`https://your-gitlab.com/-/user_settings/personal_access_tokens`**
+2. Click **"Add new token"**
+3. Give it a name (e.g. `bump-all`)
+4. Set an expiration date
+5. Check the **`api`** scope
+6. Click **"Create personal access token"**
+7. Copy the token immediately — it won't be shown again
+
+> For self-hosted GitLab, replace `your-gitlab.com` with your instance URL.
 
 ---
 
