@@ -60,7 +60,7 @@ class BumpCommand extends Command
         $excludes        = $input->getOption('exclude');
         $symfonyShortcut = $input->getOption('symfony');
         $interactive     = $input->getOption('interactive');
-        $noSslVerify     = $input->getOption('no-ssl-verify') || !empty($_ENV['NO_SSL_VERIFY']);
+        $noSslVerify     = $input->getOption('no-ssl-verify') || filter_var($_ENV['NO_SSL_VERIFY'] ?? 'false', FILTER_VALIDATE_BOOLEAN);
 
         // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
         if ($symfonyShortcut !== null) {
