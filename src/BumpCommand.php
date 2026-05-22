@@ -8,6 +8,9 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Gitlab\Client;
+use PhpSchool\CliMenu\Builder\CliMenuBuilder;
+use PhpSchool\CliMenu\CliMenu;
+use PhpSchool\CliMenu\MenuItem\CheckboxItem;
 
 #[AsCommand(
     name: 'composer:update',
@@ -120,7 +123,7 @@ class BumpCommand extends Command
         $selectedProjectIds = null;
         if ($interactive) {
             [$packages, $selectedProjectIds, $addMissing, $withAllDeps] = $this->runInteractive(
-                $input, $output, $client, $group, $baseBranch
+                $input, $output, $client, $group, $baseBranch, $phpVersion
             );
             if ($packages === null) {
                 return Command::FAILURE;
@@ -450,7 +453,7 @@ class BumpCommand extends Command
      * Interactive wizard: select projects → packages → versions → mode.
      * Returns [packages, selectedProjectIds, addMissing, withAllDeps] or [null, ...] on abort.
      */
-    private function runInteractive(InputInterface $input, OutputInterface $output, Client $client, string $group, string $baseBranch): array
+    private function runInteractive(InputInterface $input, OutputInterface $output, Client $client, string $group, string $baseBranch, ?string $phpVersion): array
     {
         $io = new SymfonyStyle($input, $output);
 
@@ -497,17 +500,19 @@ class BumpCommand extends Command
             ], array_keys($allProjects), $allProjects)
         );
 
-        // Native multiselect: user picks by number(s) or "all"
-        $projectPaths = array_column($allProjects, 'path');
-        $projectChoices = array_merge($projectPaths, ['all — select every project']);
-
-        $selectedPaths = $io->choice(
-            sprintf('Select projects (%d found) — separate multiple choices with commas', count($allProjects)),
-            $projectChoices,
-            multiSelect: true,
+        // Checkbox selection for projects
+        $selectedPaths = $this->checkboxSelect(
+            'Select projects (↑↓ navigate, Space toggle, Enter confirm)',
+            array_column($allProjects, 'path'),
+            selectAll: true,
         );
 
-        if (in_array('all — select every project', $selectedPaths, true)) {
+        if (empty($selectedPaths)) {
+            $io->warning('No projects selected. Aborted.');
+            return [null, null, false, false];
+        }
+
+        if (in_array('★ Select all projects', $selectedPaths, true)) {
             $selectedProjects = $allProjects;
         } else {
             $selectedProjects = array_values(array_filter($allProjects, fn($p) => in_array($p['path'], $selectedPaths, true)));
@@ -559,12 +564,16 @@ class BumpCommand extends Command
             ], array_keys($packageList), $packageList)
         );
 
-        // Native multiselect for packages too
-        $selectedPackageNames = $io->choice(
-            sprintf('Select packages to bump (%d found) — separate multiple choices with commas', count($packageList)),
+        // Checkbox selection for packages
+        $selectedPackageNames = $this->checkboxSelect(
+            'Select packages to bump (↑↓ navigate, Space toggle, Enter confirm)',
             $packageList,
-            multiSelect: true,
         );
+
+        if (empty($selectedPackageNames)) {
+            $io->warning('No packages selected. Aborted.');
+            return [null, null, false, false];
+        }
 
         // ── Step 3: Version per selected package ──────────────────────────────
         $io->section('③ Versions');
@@ -597,13 +606,16 @@ class BumpCommand extends Command
         // ── Summary + confirm ─────────────────────────────────────────────────
         $io->section('✅  Summary');
 
-        // definitionList() — compact key/value block (7.x feature)
-        $io->definitionList(
+        $summaryRows = [
             ['Branch'                  => $baseBranch],
             ['Projects'                => implode(', ', array_column($selectedProjects, 'path'))],
             ['Mode'                    => $addMissing ? 'upsert (add if missing)' : 'update-only'],
             ['--with-all-dependencies' => $withAllDeps ? '✓ yes' : '✗ no'],
-        );
+        ];
+        if ($phpVersion) {
+            $summaryRows[] = ['platform.php (composer)' => $phpVersion];
+        }
+        $io->definitionList(...$summaryRows);
 
         $io->table(
             ['Package', 'Current', '→', 'Target'],
@@ -621,5 +633,57 @@ class BumpCommand extends Command
         }
 
         return [$packages, array_column($selectedProjects, 'id'), $addMissing, $withAllDeps];
+    }
+
+    /**
+     * Display an interactive checkbox menu and return the selected items.
+     * ↑↓ to navigate, Space to toggle, Enter on "Confirm" to validate.
+     *
+     * @param string   $title     Menu title shown at the top
+     * @param string[] $choices   List of items to display
+     * @param bool     $selectAll Add a "Select all" shortcut at the top
+     * @return string[]           Selected item labels
+     */
+    private function checkboxSelect(string $title, array $choices, bool $selectAll = false): array
+    {
+        $selected = [];
+
+        $builder = (new CliMenuBuilder())
+            ->setTitle($title)
+            ->setWidth(min(100, max(60, max(array_map('strlen', $choices)) + 10)))
+            ->setPadding(1, 2)
+            ->setForegroundColour('white')
+            ->setSelectedMarker('❯')
+            ->setUnselectedMarker(' ');
+
+        if ($selectAll) {
+            $builder->addItem('★ Select all projects', function (CliMenu $menu) use ($choices, &$selected) {
+                foreach ($menu->getItems() as $item) {
+                    if ($item instanceof CheckboxItem) {
+                        $item->setChecked(true);
+                    }
+                }
+                $menu->redraw();
+            });
+            $builder->addLineBreak('─');
+        }
+
+        foreach ($choices as $choice) {
+            $builder->addCheckboxItem($choice, function () {});
+        }
+
+        $builder->addLineBreak('─');
+        $builder->addItem('✅  Confirm selection', function (CliMenu $menu) use (&$selected) {
+            foreach ($menu->getItems() as $item) {
+                if ($item instanceof CheckboxItem && $item->getChecked()) {
+                    $selected[] = $item->getText();
+                }
+            }
+            $menu->close();
+        });
+
+        $builder->build()->open();
+
+        return $selected;
     }
 }
