@@ -461,10 +461,9 @@ class BumpCommand extends Command
         $io = new SymfonyStyle($input, $output);
 
         $io->title('bump-all — Interactive Wizard');
-        $io->info([
-            'This wizard will guide you through 4 steps:',
-            '  ① Select projects   ② Select packages',
-            '  ③ Set versions      ④ Configure options',
+        $output->writeln([
+            '  <comment>①</comment> Select projects   <comment>②</comment> Select packages   <comment>③</comment> Set versions   <comment>④</comment> Configure options',
+            '',
         ]);
 
         // ── Step 1: Fetch & select projects ──────────────────────────────────
