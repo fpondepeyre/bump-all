@@ -655,8 +655,7 @@ class BumpCommand extends Command
             ->setWidth(min(100, max(60, max(array_map('strlen', $choices)) + 10)))
             ->setPadding(1, 2)
             ->setForegroundColour('white')
-            ->setSelectedMarker('❯')
-            ->setUnselectedMarker(' ');
+            ->setBackgroundColour('blue');
 
         if ($selectAll) {
             $builder->addItem('★ Select all projects', function (CliMenu $menu) use ($choices, &$selected) {
