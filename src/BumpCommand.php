@@ -45,6 +45,7 @@ class BumpCommand extends Command
         $this->addOption('symfony', null, InputOption::VALUE_REQUIRED, 'Shortcut for Symfony major migration: updates all symfony/* packages to the given version (e.g. --symfony=7.4). Automatically excludes packages with independent versioning and enables --with-all-dependencies.');
         $this->addOption('interactive', 'i', InputOption::VALUE_NONE, 'Interactive mode: pick projects, packages and versions step by step.');
         $this->addOption('update-lock', null, InputOption::VALUE_NONE, 'Update composer.lock to latest versions within existing constraints (runs composer update without modifying composer.json).');
+        $this->addOption('audit', null, InputOption::VALUE_NONE, 'Audit mode: detect packages with known CVE vulnerabilities (via composer audit) and update only those packages, then create a security MR.');
         $this->addOption('no-ssl-verify', null, InputOption::VALUE_NONE, 'Disable SSL certificate verification (useful for self-signed or internal CA certificates). Can also be set via NO_SSL_VERIFY=true in .env.');
     }
 
@@ -62,6 +63,7 @@ class BumpCommand extends Command
         $symfonyShortcut = $input->getOption('symfony');
         $interactive     = $input->getOption('interactive');
         $updateLock      = $input->getOption('update-lock');
+        $audit           = $input->getOption('audit');
         $noSslVerify     = $input->getOption('no-ssl-verify') || filter_var($_ENV['NO_SSL_VERIFY'] ?? 'false', FILTER_VALIDATE_BOOLEAN);
 
         // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
@@ -87,8 +89,8 @@ class BumpCommand extends Command
                 $packages[$name] = $version;
             }
 
-            if (empty($packages) && !$interactive && !$updateLock) {
-                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y, --update-lock, or -i for interactive mode.</error>');
+            if (empty($packages) && !$interactive && !$updateLock && !$audit) {
+                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y, --update-lock, --audit, or -i for interactive mode.</error>');
                 return Command::FAILURE;
             }
         }
@@ -122,10 +124,10 @@ class BumpCommand extends Command
         // Interactive mode: pick projects, packages and versions interactively
         $selectedProjectIds = null;
         if ($interactive) {
-            [$packages, $selectedProjectIds, $addMissing, $withAllDeps, $updateLock] = $this->runInteractive(
+            [$packages, $selectedProjectIds, $addMissing, $withAllDeps, $updateLock, $audit] = $this->runInteractive(
                 $input, $output, $client, $group, $baseBranch, $phpVersion
             );
-            if ($packages === null) {
+            if ($packages === null && !$updateLock && !$audit) {
                 return Command::FAILURE;
             }
         }
@@ -133,6 +135,8 @@ class BumpCommand extends Command
         $output->writeln("Scanning group <info>$group</info> on <info>$gitlabUrl</info>");
         if ($updateLock) {
             $output->writeln("Mode: <info>update-lock</info> — composer update within existing constraints  (branch: <info>$baseBranch</info>)");
+        } elseif ($audit) {
+            $output->writeln("Mode: <info>audit</info> — detect and fix CVE vulnerabilities  (branch: <info>$baseBranch</info>)");
         } else {
             $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
             $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
@@ -309,6 +313,197 @@ class BumpCommand extends Command
                         $client->mergeRequests()->create($projectId, $branch, $baseBranch, $mrTitle, [
                             'description'          => $mrDescription,
                             'remove_source_branch' => true,
+                        ]);
+                        $output->writeln('  MR created successfully.');
+                        $totalUpdated++;
+                    } catch (\Exception $e) {
+                        $msg = $e->getMessage();
+                        if (str_contains($msg, 'already exists') || str_contains($msg, 'duplicate')) {
+                            $output->writeln('  MR already exists.');
+                            $totalUpdated++;
+                        } else {
+                            $output->writeln('  <error>Cannot create MR: ' . $msg . '</error>');
+                        }
+                    }
+                    continue;
+                }
+
+                // ── AUDIT MODE (fix CVE vulnerabilities) ──────────────────────────────
+                if ($audit) {
+                    // Step 1: fetch composer.lock via API (no clone needed for audit)
+                    $composerLockBlobId  = null;
+                    $composerLockContent = null;
+                    try {
+                        $lockFile            = $client->repositoryFiles()->getFile($projectId, 'composer.lock', $baseBranch);
+                        $composerLockBlobId  = $lockFile['blob_id'];
+                        $composerLockContent = base64_decode($lockFile['content']);
+                    } catch (\Exception $e) {
+                        $output->writeln('  no composer.lock on branch ' . $baseBranch . ', skipping audit.');
+                        continue;
+                    }
+
+                    // Step 2: write composer.json + composer.lock to tmpDir and run composer audit
+                    $tmpDir = '/tmp/bump-audit-' . $projectPath;
+                    exec('rm -rf ' . escapeshellarg($tmpDir) . ' && mkdir -p ' . escapeshellarg($tmpDir));
+                    file_put_contents($tmpDir . '/composer.json', base64_decode($composerFile['content']));
+                    file_put_contents($tmpDir . '/composer.lock', $composerLockContent);
+
+                    $auditOut = [];
+                    exec(
+                        'cd ' . escapeshellarg($tmpDir) . ' && composer audit --format=json --no-interaction 2>/dev/null',
+                        $auditOut, $auditRet
+                    );
+                    exec('rm -rf ' . escapeshellarg($tmpDir));
+
+                    if ($auditRet === 0) {
+                        $output->writeln('  no vulnerabilities found, skipping.');
+                        continue;
+                    }
+
+                    if ($auditRet > 1) {
+                        $output->writeln(sprintf('  <comment>composer audit error (exit %d), skipping.</comment>', $auditRet));
+                        continue;
+                    }
+
+                    $auditJson  = json_decode(implode('', $auditOut), true);
+                    $advisories = $auditJson['advisories'] ?? [];
+
+                    if (empty($advisories)) {
+                        $output->writeln('  no vulnerabilities found, skipping.');
+                        continue;
+                    }
+
+                    $vulnerablePackages = array_keys($advisories);
+                    $cveLines           = [];
+                    foreach ($advisories as $pkg => $advList) {
+                        foreach ($advList as $adv) {
+                            $cve      = $adv['cve'] ?? $adv['advisoryId'] ?? 'unknown';
+                            $title    = $adv['title'] ?? '';
+                            $link     = $adv['link'] ?? '';
+                            $cveLines[] = $link
+                                ? "- **$pkg**: [$cve]($link) — $title"
+                                : "- **$pkg**: $cve — $title";
+                        }
+                    }
+
+                    $output->writeln(sprintf(
+                        '  <comment>%d vulnerable package(s): %s</comment>',
+                        count($vulnerablePackages),
+                        implode(', ', $vulnerablePackages)
+                    ));
+
+                    // Step 3: full clone + targeted composer update
+                    try {
+                        $branchInfo = $client->repositories()->branch($projectId, $baseBranch);
+                        $baseSha    = $branchInfo['commit']['id'];
+                    } catch (\Exception $e) {
+                        $output->writeln("  <error>Cannot get branch '$baseBranch': " . $e->getMessage() . '</error>');
+                        continue;
+                    }
+
+                    $tmpDir   = '/tmp/bump-audit-' . $projectPath;
+                    $authFile = $tmpDir . '-auth.json';
+                    $gitHost  = parse_url($gitlabUrl, PHP_URL_HOST);
+                    exec('rm -rf ' . escapeshellarg($tmpDir));
+
+                    $cloneUrl = preg_replace('#^(https?://)#', '$1oauth2:' . $token . '@', $project['http_url_to_repo']);
+                    $cloneOut = [];
+                    exec(
+                        'git clone -b ' . escapeshellarg($baseBranch) . ' ' . escapeshellarg($cloneUrl) . ' ' . escapeshellarg($tmpDir) . ' 2>&1',
+                        $cloneOut, $cloneRet
+                    );
+                    if ($cloneRet !== 0) {
+                        $output->writeln('  <error>Clone failed: ' . implode(' ', $cloneOut) . '</error>');
+                        continue;
+                    }
+
+                    file_put_contents($authFile, json_encode(['gitlab-token' => [$gitHost => $token]]));
+                    chmod($authFile, 0600);
+
+                    if ($phpVersion) {
+                        exec('cd ' . escapeshellarg($tmpDir) . ' && composer config platform.php ' . escapeshellarg($phpVersion) . ' 2>&1');
+                    }
+
+                    $pkgArgs       = implode(' ', array_map('escapeshellarg', $vulnerablePackages));
+                    $composerFlags = '--no-interaction --no-scripts' . ($withAllDeps ? ' --with-all-dependencies' : '');
+                    [$composerRet, $composerOut] = $this->runCommandLive(
+                        'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' ' . $pkgArgs . ' 2>&1',
+                        $output
+                    );
+
+                    if ($composerRet !== 0) {
+                        $missingExts = [];
+                        foreach ($composerOut as $line) {
+                            if (preg_match('/requires? (ext-[\w]+)/', $line, $m)) {
+                                $missingExts[$m[1]] = true;
+                            }
+                        }
+                        if (!empty($missingExts)) {
+                            $ignoreFlags = implode(' ', array_map(fn($ext) => '--ignore-platform-req=' . escapeshellarg($ext), array_keys($missingExts)));
+                            [$composerRet, $composerOut] = $this->runCommandLive(
+                                'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' ' . $ignoreFlags . ' ' . $pkgArgs . ' 2>&1',
+                                $output
+                            );
+                        }
+                    }
+
+                    if ($phpVersion) {
+                        exec('cd ' . escapeshellarg($tmpDir) . ' && composer config --unset platform 2>&1');
+                    }
+
+                    if ($composerRet !== 0) {
+                        $output->writeln('  <error>composer update failed:</error>');
+                        $output->writeln(implode("\n", $composerOut));
+                        exec('rm -rf ' . escapeshellarg($tmpDir));
+                        @unlink($authFile);
+                        continue;
+                    }
+
+                    $newLock = file_exists($tmpDir . '/composer.lock') ? file_get_contents($tmpDir . '/composer.lock') : null;
+                    exec('rm -rf ' . escapeshellarg($tmpDir));
+                    @unlink($authFile);
+
+                    if ($newLock === null || $newLock === $composerLockContent) {
+                        $output->writeln('  lock unchanged after update, skipping.');
+                        continue;
+                    }
+
+                    // Step 4: create branch + commit lock + MR
+                    $branch = 'bump-security-audit';
+                    try { $client->repositories()->deleteBranch($projectId, $branch); } catch (\Exception $e) {}
+                    try {
+                        $client->repositories()->createBranch($projectId, $branch, $baseSha);
+                    } catch (\Exception $e) {
+                        $output->writeln('  <error>Cannot create branch: ' . $e->getMessage() . '</error>');
+                        continue;
+                    }
+
+                    $output->writeln('  vulnerabilities fixed ...');
+
+                    try {
+                        $action = $composerLockBlobId !== null ? 'updateFile' : 'createFile';
+                        $client->repositoryFiles()->$action($projectId, [
+                            'file_path'      => 'composer.lock',
+                            'branch'         => $branch,
+                            'content'        => $newLock,
+                            'commit_message' => 'fix(security): update vulnerable packages — ' . implode(', ', $vulnerablePackages),
+                            'encoding'       => 'text',
+                        ]);
+                    } catch (\Exception $e) {
+                        $output->writeln('  <error>Cannot commit composer.lock: ' . $e->getMessage() . '</error>');
+                        continue;
+                    }
+
+                    $mrTitle       = sprintf('fix(security): patch %d CVE vulnerable package(s)', count($vulnerablePackages));
+                    $mrDescription = "## 🔒 Automated security fix\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### Vulnerabilities fixed\n\n"
+                        . implode("\n", $cveLines)
+                        . "\n\n### What changed\n\nRan `composer update` targeting only the vulnerable packages. No other dependencies were modified (unless required transitively).\n\nPlease review the diff and make sure the CI passes before merging.";
+
+                    try {
+                        $client->mergeRequests()->create($projectId, $branch, $baseBranch, $mrTitle, [
+                            'description'          => $mrDescription,
+                            'remove_source_branch' => true,
+                            'labels'               => 'security',
                         ]);
                         $output->writeln('  MR created successfully.');
                         $totalUpdated++;
@@ -607,8 +802,10 @@ class BumpCommand extends Command
         $modeChoice = $io->choice('What do you want to do?', [
             'bump'        => 'Bump specific packages to a target version',
             'update-lock' => 'Update composer.lock to latest (within existing constraints)',
+            'audit'       => 'Audit and fix CVE security vulnerabilities',
         ], 'bump');
         $updateLock = $modeChoice === 'update-lock';
+        $audit      = $modeChoice === 'audit';
 
         // ── Step 1: Fetch & select projects ──────────────────────────────────
         $io->section('① Projects');
@@ -623,7 +820,7 @@ class BumpCommand extends Command
                 ]);
             } catch (\Exception $e) {
                 $io->error('Cannot fetch projects: ' . $e->getMessage());
-                return [null, null, false, false, false];
+                return [null, null, false, false, false, false];
             }
             $allProjects = array_merge($allProjects, $batch);
             $page++;
@@ -631,7 +828,7 @@ class BumpCommand extends Command
 
         if (empty($allProjects)) {
             $io->error('No projects found in group.');
-            return [null, null, false, false, false];
+            return [null, null, false, false, false, false];
         }
 
         $io->success(sprintf('%d project(s) found in group.', count($allProjects)));
@@ -674,7 +871,7 @@ class BumpCommand extends Command
         $addMissing = false;
         $allPackages = [];
 
-        if (!$updateLock) {
+        if (!$updateLock && !$audit) {
             $io->section('② Packages');
             $io->text(sprintf('Fetching <info>composer.json</info> from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
             $io->newLine();
@@ -700,7 +897,7 @@ class BumpCommand extends Command
 
             if (empty($allPackages)) {
                 $io->error('No packages found in the selected projects on branch ' . $baseBranch);
-                return [null, null, false, false, false];
+                return [null, null, false, false, false, false];
             }
 
             ksort($allPackages);
@@ -722,7 +919,7 @@ class BumpCommand extends Command
 
             if (empty($selectedPackageNames)) {
                 $io->warning('No packages selected. Aborted.');
-                return [null, null, false, false, false];
+                return [null, null, false, false, false, false];
             }
 
             // ── Step 3: Version per selected package ──────────────────────────────
@@ -760,12 +957,12 @@ class BumpCommand extends Command
         $summaryRows = [
             ['Branch'                  => $baseBranch],
             ['Projects'                => implode(', ', array_column($selectedProjects, 'path'))],
-            ['Mode'                    => $updateLock ? 'update-lock (composer update within constraints)' : ($addMissing ? 'upsert (add if missing)' : 'update-only')],
+            ['Mode'                    => $audit ? 'audit (detect and fix CVE vulnerabilities)' : ($updateLock ? 'update-lock (composer update within constraints)' : ($addMissing ? 'upsert (add if missing)' : 'update-only'))],
             ['--with-all-dependencies' => $withAllDeps ? '✓ yes' : '✗ no'],
         ];
         $io->definitionList(...$summaryRows);
 
-        if (!$updateLock) {
+        if (!$updateLock && !$audit) {
             $io->table(
                 ['Package', 'Current', '→', 'Target'],
                 array_map(fn($pkg, $ver) => [
@@ -779,10 +976,10 @@ class BumpCommand extends Command
 
         if (!$io->confirm('🚀  Proceed and create MRs?', false)) {
             $io->warning('Aborted by user.');
-            return [null, null, false, false, false];
+            return [null, null, false, false, false, false];
         }
 
-        return [$packages, array_column($selectedProjects, 'id'), $addMissing, $withAllDeps, $updateLock];
+        return [$packages, array_column($selectedProjects, 'id'), $addMissing, $withAllDeps, $updateLock, $audit];
     }
 
     /**

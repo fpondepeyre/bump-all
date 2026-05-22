@@ -57,6 +57,440 @@ GITLAB_BASE_BRANCH=main                   # branch to update and target for MRs
 
 ---
 
+## Docker flags: `-t` vs `-it`
+
+| Flag | When to use |
+|------|------------|
+| `-t` | All non-interactive commands — allocates a TTY so the **live spinner** works during `composer update` |
+| `-it` | Interactive wizard (`-i`) only — needs both TTY and stdin |
+
+```bash
+# Non-interactive (always use -t)
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
+
+# Interactive wizard (always use -it)
+docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all -i
+```
+
+Without `-t`, there is no spinner — a single `running composer update... done.` line is shown instead.
+
+---
+
+## Usage
+
+Three modes are available:
+
+| Mode | Command | What it does |
+|------|---------|-------------|
+| **Interactive wizard** | `-i` | Step-by-step: pick projects, mode, packages, versions |
+| **Bump packages** | `"vendor/pkg:version" ...` | Update specific packages to a target version |
+| **Update lock** | `--update-lock` | Refresh `composer.lock` to latest patch/minor within existing constraints |
+| **Security audit** | `--audit` | Detect CVE vulnerabilities and update only affected packages |
+
+---
+
+## Interactive mode (`-i`)
+
+The wizard guides you through selecting the mode, projects, packages, versions, and options.
+
+```bash
+docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all -i
+```
+
+### What you'll see
+
+```
+bump-all — Interactive Wizard
+==============================
+
+  ① Select projects   ② Select packages   ③ Set versions   ④ Configure options
+
+ What do you want to do?
+  [bump]        Bump specific packages to a target version
+  [update-lock] Update composer.lock to latest (within existing constraints)
+  [audit]       Audit and fix CVE security vulnerabilities
+ > bump
+```
+
+```
+① Projects
+----------
+ [OK] 25 project(s) found in group.
+
+ #   Project                               Default branch
+ 1   my-org/backends/service-search        release/2026.7.4
+ 2   my-org/backends/service-order         release/2026.7.4
+ ...
+
+ Select projects by number (e.g. 1,3,5 or all):
+ > 1,2
+```
+
+```
+② Packages
+----------
+ Type a package name and press Tab to autocomplete.
+ You can also type any vendor/package name not yet in your projects.
+ Press Enter with an empty line to finish.
+
+Package: symfony/http-client
+  [OK] symfony/http-client
+Package (1 selected, empty to finish):
+```
+
+```
+③ Versions
+----------
+  symfony/http-client (currently 6.4.*): 7.4.*
+```
+
+```
+④ Options
+---------
+ Update mode:
+  [update-only] skip projects where the package is absent
+  [upsert]      also add the package if missing
+ > update-only
+
+ Use --with-all-dependencies? [no]: no
+```
+
+Then a summary is displayed and you confirm before any MR is created.
+
+### Tips for interactive mode
+
+- **Select all projects**: type `all` at the project selection prompt
+- **Multiple projects**: type comma-separated numbers like `1,3,5`
+- **Tab autocomplete**: start typing a package name and press Tab
+- **New package**: type any `vendor/package` name even if not in any project yet — use `upsert` mode to add it
+- **Multiple packages**: keep entering packages one by one, empty line to finish
+- **update-lock mode**: skips package/version steps entirely — just select projects and confirm
+- **audit mode**: skips package/version steps — scans each project for CVEs then updates only the affected packages
+
+---
+
+## Update lock mode (`--update-lock`)
+
+Refreshes `composer.lock` to the latest versions **within the existing constraints** in `composer.json` — without modifying `composer.json` itself.
+
+Useful for routine patch/minor updates across all projects.
+
+#### On a single project (test first)
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock \
+  --base-branch="release/2026.7.4" \
+  --project="service-search"
+```
+
+#### Roll out to all projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock \
+  --base-branch="release/2026.7.4"
+```
+
+#### Also allow transitive upgrades
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock \
+  --with-all-dependencies \
+  --base-branch="release/2026.7.4"
+```
+
+Projects where `composer.lock` has no changes are **silently skipped** — no MR created.
+
+---
+
+## Security audit mode (`--audit`)
+
+Scans each project for known CVE vulnerabilities using `composer audit`, then runs `composer update` **only on the affected packages**. Creates a MR tagged `security` with the CVE details in the description.
+
+Projects with no vulnerabilities are silently skipped.
+
+#### On a single project (test first)
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --audit \
+  --base-branch="release/2026.7.4" \
+  --project="service-search"
+```
+
+#### Roll out to all projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --audit \
+  --base-branch="release/2026.7.4"
+```
+
+#### Also allow transitive upgrades (recommended for deep CVEs)
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --audit \
+  --with-all-dependencies \
+  --base-branch="release/2026.7.4"
+```
+
+The MR description automatically lists each CVE with its advisory ID, title and a link to the security advisory.
+
+---
+
+## Bump packages mode
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "vendor/name:version" ["vendor/name:version" ...] [options]
+```
+
+Each package argument uses the format `vendor/name:version`.
+
+#### Update a single package across all projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*"
+```
+
+#### Update multiple packages at once
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  "symfony/messenger:7.4.*" \
+  "symfony/console:7.4.*"
+```
+
+#### Target a specific branch
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  --base-branch="release/2026.7.4"
+```
+
+#### Test on a single project first
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  --project="my-org/backends/service-search" \
+  --base-branch="release/2026.7.4"
+```
+
+#### Add a package not yet declared in the projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  --add-missing
+```
+
+#### Allow composer to upgrade transitive dependencies
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  --with-all-dependencies
+```
+
+#### Override the GitLab group without changing `.env`
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "vendor/package:^3.0" \
+  --group="other-org/other-team"
+```
+
+---
+
+## Symfony major version migration
+
+Migrating from Symfony 6.4 → 7.4? Use the `--symfony` shortcut instead of listing every package manually.
+
+#### Test on one project first
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --base-branch="release/2026.7.4" \
+  --project="my-org/backends/service-search"
+```
+
+#### Roll out to all projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --base-branch="release/2026.7.4"
+```
+
+#### Add custom exclusions
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --base-branch="release/2026.7.4" \
+  --exclude="symfony/my-custom-bundle"
+```
+
+What `--symfony=7.4` does automatically:
+- Updates **all `symfony/*` packages** to `7.4.*`
+- Updates **`extra.symfony.require`** to `7.4.*` (required by Symfony Flex)
+- Enables **`--with-all-dependencies`** (recommended for major upgrades)
+- **Auto-excludes** packages with independent versioning: `symfony/flex`, `symfony/monolog-bundle`, `symfony/maker-bundle`, `symfony/webpack-encore-bundle`, `symfony/ux-*`
+
+See the [Symfony upgrade guide](https://symfony.com/doc/current/setup/upgrade_major.html) for background.
+
+---
+
+## All options
+
+| Option                    | Env var                | Default        | Description                                                                       |
+|---------------------------|------------------------|----------------|-----------------------------------------------------------------------------------|
+| `--interactive`, `-i`     | —                      | —              | Launch the interactive wizard                                                     |
+| `--update-lock`           | —                      | —              | Refresh `composer.lock` within existing constraints (no `composer.json` changes)  |
+| `--audit`                 | —                      | —              | Detect CVE vulnerabilities and update only affected packages                      |
+| `--token`, `-t`           | `GITLAB_TOKEN`         | —              | GitLab personal access token                                                      |
+| `--group`, `-g`           | `GITLAB_GROUP`         | —              | GitLab group path or numeric ID                                                   |
+| `--gitlab-url`            | `GITLAB_URL`           | —              | GitLab instance URL                                                               |
+| `--base-branch`           | `GITLAB_BASE_BRANCH`   | `master`       | Branch to update and target for MRs                                               |
+| `--project`               | —                      | —              | Restrict to a single project by name or path                                      |
+| `--php-version`           | `COMPOSER_PHP_VERSION` | *(Docker PHP)* | PHP version for `composer update` — only if CI differs from Docker image          |
+| `--symfony=X.Y`           | —                      | —              | Symfony major migration shortcut (see above)                                      |
+| `--add-missing`           | —                      | off            | Add packages not yet in `composer.json` (upsert mode)                             |
+| `--with-all-dependencies` | —                      | off            | Pass `-W` to composer, allowing transitive upgrades/downgrades                    |
+| `--exclude`               | —                      | —              | Exclude a package from being updated (repeatable)                                 |
+| `--no-ssl-verify`         | `NO_SSL_VERIFY`        | off            | Disable SSL certificate verification (self-signed / internal CA)                  |
+
+> CLI flags always override `.env` values.
+
+---
+
+## Update modes (bump mode only)
+
+| Mode          | Flag            | Behaviour                                                   |
+|---------------|-----------------|-------------------------------------------------------------|
+| `update-only` | *(default)*     | Only updates packages already present in `composer.json`    |
+| `upsert`      | `--add-missing` | Also **adds** packages absent from `composer.json`          |
+
+---
+
+## Tips
+
+**Live spinner** — use `-t` (or `-it` for the wizard) so `composer update` shows an animated progress line instead of a silent wait.
+
+**Private GitLab packages** — authentication is handled automatically via `GITLAB_TOKEN`.
+
+**Missing PHP extensions** — the Docker image ships with `ext-rdkafka`, `ext-amqp`, and `ext-grpc`. If `composer update` fails due to a missing extension, the tool retries automatically ignoring only those extensions.
+
+**PHP version** — `COMPOSER_PHP_VERSION` is optional. If unset, the Docker image's PHP version is used. Only set it if your CI runs a different PHP version.
+
+**Re-running** — safe to run multiple times. If the bump branch already exists it is recreated from scratch.
+
+**Self-signed certificates** — set `NO_SSL_VERIFY=true` in `.env` or pass `--no-ssl-verify`.
+
+**Private network** — if your GitLab is only reachable from the host (VPN, internal DNS), always add `--network=host`.
+
+---
+
+## Docker quick reference
+
+```bash
+# Build the image (once)
+docker build -t bump-all .
+
+# Interactive wizard
+docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all -i
+
+# Update lock file — one project
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock --base-branch="release/2026.7.4" --project="service-search"
+
+# Update lock file — all projects
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock --base-branch="release/2026.7.4"
+
+# Bump a single package
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" --base-branch="release/2026.7.4"
+
+# Symfony migration — test on one project
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 --base-branch="release/2026.7.4" --project="my-org/backends/service-search"
+
+# Symfony migration — all projects
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 --base-branch="release/2026.7.4"
+
+# Multiple packages, specific branch
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" "symfony/messenger:7.4.*" \
+  --base-branch="release/2026.7.4"
+```
+
+Update one or more Composer dependencies across every project in a GitLab group and open a **Merge Request** for each — in a single command.
+
+---
+
+## How it works
+
+For each project in your GitLab group, `bump-all`:
+
+1. Checks if any of the target packages exist in `composer.json`
+2. Updates their versions and runs `composer update` locally
+3. Pushes a new branch with the updated `composer.json` + `composer.lock`
+4. Opens a Merge Request targeting your base branch
+
+---
+
+## Requirements
+
+- **Docker** (recommended) — no local PHP/Composer needed
+- A GitLab personal access token with **`api`** scope
+
+### Creating a GitLab token
+
+1. Go to **`https://your-gitlab.com/-/user_settings/personal_access_tokens`**
+2. Click **"Add new token"**, give it a name (e.g. `bump-all`)
+3. Check the **`api`** scope and set an expiration date
+4. Click **"Create personal access token"** and copy it immediately
+
+> For self-hosted GitLab, replace `your-gitlab.com` with your instance URL.
+
+---
+
+## Setup
+
+```bash
+git clone https://github.com/fpondepeyre/bump-all.git
+cd bump-all
+docker build -t bump-all .
+cp .env.example .env
+```
+
+Fill in your `.env`:
+
+```env
+GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx   # your GitLab personal access token
+GITLAB_GROUP=my-company/my-team           # group path in GitLab (can be nested: org/team/sub)
+GITLAB_URL=https://gitlab.com             # your GitLab instance URL
+GITLAB_BASE_BRANCH=main                   # branch to update and target for MRs
+# COMPOSER_PHP_VERSION=8.3.27             # uncomment only if your CI PHP differs from the Docker image
+# NO_SSL_VERIFY=true                      # uncomment for self-signed / internal CA certificates
+```
+
+> `.env` is git-ignored. Never commit it.
+
+> **Self-hosted GitLab behind a private network?** Use `--network=host` when running Docker so the container reaches your GitLab instance through the host's network stack (see examples below).
+
+---
+
 ## Usage
 
 Two modes are available: **interactive wizard** (`-i`) and **command-line flags**.
