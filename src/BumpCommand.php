@@ -43,6 +43,7 @@ class BumpCommand extends Command
         $this->addOption('exclude', null, InputOption::VALUE_IS_ARRAY | InputOption::VALUE_REQUIRED, 'Exclude a package from being updated (can be repeated, e.g. --exclude=symfony/flex --exclude=symfony/monolog-bundle).');
         $this->addOption('symfony', null, InputOption::VALUE_REQUIRED, 'Shortcut for Symfony major migration: updates all symfony/* packages to the given version (e.g. --symfony=7.4). Automatically excludes packages with independent versioning and enables --with-all-dependencies.');
         $this->addOption('interactive', 'i', InputOption::VALUE_NONE, 'Interactive mode: pick projects, packages and versions step by step.');
+        $this->addOption('no-ssl-verify', null, InputOption::VALUE_NONE, 'Disable SSL certificate verification (useful for self-signed or internal CA certificates). Can also be set via NO_SSL_VERIFY=true in .env.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -58,6 +59,7 @@ class BumpCommand extends Command
         $excludes        = $input->getOption('exclude');
         $symfonyShortcut = $input->getOption('symfony');
         $interactive     = $input->getOption('interactive');
+        $noSslVerify     = $input->getOption('no-ssl-verify') || !empty($_ENV['NO_SSL_VERIFY']);
 
         // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
         if ($symfonyShortcut !== null) {
@@ -101,7 +103,10 @@ class BumpCommand extends Command
             return Command::FAILURE;
         }
 
-        $client = new Client();
+        $httpClient = new \GuzzleHttp\Client([
+            'verify' => !$noSslVerify,
+        ]);
+        $client = new Client(new \Http\Adapter\Guzzle7\Client($httpClient));
         $client->setUrl($gitlabUrl);
         $client->authenticate($token, Client::AUTH_HTTP_TOKEN);
 
