@@ -138,7 +138,7 @@ Then a summary is displayed and you confirm before any MR is created.
 ## Command-line mode
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "vendor/name:version" ["vendor/name:version" ...] [options]
 ```
 
@@ -149,14 +149,14 @@ Each package argument uses the format `vendor/name:version`.
 #### Update a single package across all projects
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*"
 ```
 
 #### Update multiple packages at once
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   "symfony/messenger:7.4.*" \
   "symfony/console:7.4.*"
@@ -165,7 +165,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Target a specific branch (e.g. a release branch)
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   --base-branch="release/2026.7.4"
 ```
@@ -173,7 +173,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Test on a single project before rolling out to all
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   --project="my-org/backends/service-search" \
   --base-branch="release/2026.7.4"
@@ -182,7 +182,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Add a package that doesn't exist yet in the projects (upsert)
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   --add-missing
 ```
@@ -190,7 +190,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Allow composer to upgrade transitive dependencies
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   --with-all-dependencies
 ```
@@ -198,7 +198,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Override the GitLab group without changing `.env`
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "vendor/package:^3.0" \
   --group="other-org/other-team"
 ```
@@ -206,7 +206,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Verbose output (shows every project scanned)
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "vendor/package:^3.0" -v
 ```
 
@@ -219,7 +219,7 @@ Migrating from Symfony 6.4 → 7.4 across all your projects? Use the `--symfony`
 #### Test on one project first
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   --symfony=7.4 \
   --base-branch="release/2026.7.4" \
   --project="my-org/backends/service-search"
@@ -228,7 +228,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Roll out to all projects
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   --symfony=7.4 \
   --base-branch="release/2026.7.4"
 ```
@@ -236,7 +236,7 @@ docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
 #### Add custom exclusions (on top of the built-in ones)
 
 ```bash
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   --symfony=7.4 \
   --base-branch="release/2026.7.4" \
   --exclude="symfony/my-custom-bundle"
@@ -283,10 +283,10 @@ See the [Symfony upgrade guide](https://symfony.com/doc/current/setup/upgrade_ma
 
 ```bash
 # update-only (default): skips projects where symfony/http-client is not declared
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*"
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*"
 
 # upsert: adds symfony/http-client even to projects that don't have it yet
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*" --add-missing
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*" --add-missing
 ```
 
 ---
@@ -317,22 +317,22 @@ docker build -t bump-all .
 docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all -i
 
 # Single package, all projects
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
 
 # Symfony migration on one project (dry-run style test)
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   --symfony=7.4 \
   --base-branch="release/2026.7.4" \
   --project="my-org/backends/service-search"
 
 # Multiple packages, specific branch
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/http-client:7.4.*" \
   "symfony/messenger:7.4.*" \
   --base-branch="release/2026.7.4"
 
 # Wildcard: all symfony/* except those with independent versioning
-docker run --rm --network=host -v $(pwd)/.env:/app/.env bump-all \
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
   "symfony/*:7.4.*" \
   --exclude="symfony/flex" \
   --exclude="symfony/monolog-bundle" \

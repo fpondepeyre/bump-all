@@ -862,7 +862,11 @@ class BumpCommand extends Command
         $buffer     = '';
         $lastStatus = 'running...';
         $lastLen    = 0;
-        $useSpin    = $output->isDecorated(); // only on real TTY
+        $useSpin    = stream_isatty(STDOUT); // spinner only when connected to a real TTY
+
+        if (!$useSpin) {
+            $output->write($prefix . 'running composer update... ');
+        }
 
         $redraw = function (string $status) use ($output, $spinner, &$tick, &$lastLen, $prefix, $useSpin) {
             if (!$useSpin) return;
@@ -898,9 +902,8 @@ class BumpCommand extends Command
                     if ($useSpin) {
                         $lastStatus = $clean;
                         $redraw($lastStatus);
-                    } else {
-                        $output->writeln($prefix . '  ' . $clean);
                     }
+                    // non-TTY: silently collect lines, shown only on error
                 }
             }
 
@@ -911,7 +914,7 @@ class BumpCommand extends Command
             $clean = trim($buffer);
             if ($clean !== '') {
                 $lines[] = $clean;
-                if ($useSpin) { $redraw($clean); } else { $output->writeln($prefix . '  ' . $clean); }
+                if ($useSpin) { $redraw($clean); }
             }
         }
 
@@ -919,9 +922,11 @@ class BumpCommand extends Command
         fclose($pipes[2]);
         $exitCode = proc_close($process);
 
-        // Clear the spinner line
+        // Clear the spinner line or close the "running..." line
         if ($useSpin) {
             $output->write("\r" . str_repeat(' ', $lastLen) . "\r");
+        } else {
+            $output->writeln($exitCode === 0 ? 'done.' : 'failed.');
         }
 
         return [$exitCode, $lines];
