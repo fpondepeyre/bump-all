@@ -47,7 +47,7 @@ GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx   # your GitLab personal access token
 GITLAB_GROUP=my-company/my-team           # group path in GitLab (can be nested: org/team/sub)
 GITLAB_URL=https://gitlab.com             # your GitLab instance URL
 GITLAB_BASE_BRANCH=main                   # branch to update and target for MRs
-COMPOSER_PHP_VERSION=8.3.0               # PHP version used in your CI/CD
+# COMPOSER_PHP_VERSION=8.3.27             # uncomment only if your CI PHP differs from the Docker image
 # NO_SSL_VERIFY=true                      # uncomment for self-signed / internal CA certificates
 ```
 
@@ -263,7 +263,7 @@ See the [Symfony upgrade guide](https://symfony.com/doc/current/setup/upgrade_ma
 | `--gitlab-url`            | `GITLAB_URL`           | —          | GitLab instance URL                                                               |
 | `--base-branch`           | `GITLAB_BASE_BRANCH`   | `master`   | Branch to update and target for MRs                                               |
 | `--project`               | —                      | —          | Restrict to a single project by name or path                                      |
-| `--php-version`           | `COMPOSER_PHP_VERSION` | —          | PHP version for `composer update` resolution (should match your CI)               |
+| `--php-version`           | `COMPOSER_PHP_VERSION` | *(Docker PHP)* | PHP version for `composer update` resolution — only if CI differs from Docker |
 | `--symfony=X.Y`           | —                      | —          | Symfony major migration shortcut (see above)                                      |
 | `--add-missing`           | —                      | off        | Add packages not yet in `composer.json` (upsert mode)                             |
 | `--with-all-dependencies` | —                      | off        | Pass `-W` to composer, allowing transitive upgrades/downgrades                    |
