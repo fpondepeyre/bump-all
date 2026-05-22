@@ -71,47 +71,21 @@ Each package is passed as `vendor/name:version`. You can pass as many as you nee
 # Update a single package
 docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0"
 
-# Update multiple specific packages
+# Symfony major migration — the easy way (see details below)
 docker run --rm -v $(pwd)/.env:/app/.env bump-all \
-  "symfony/http-client:7.4.*" \
-  "symfony/console:7.4.*" \
-  "symfony/framework-bundle:7.4.*"
-
-# Migrate ALL symfony/* packages to 7.4 across every project in your group
-# Some symfony packages have their own versioning — exclude them explicitly
-docker run --rm -v $(pwd)/.env:/app/.env bump-all \
-  "symfony/*:7.4.*" \
-  --exclude="symfony/flex" \
-  --exclude="symfony/monolog-bundle" \
-  --exclude="symfony/maker-bundle" \
-  --exclude="symfony/phpunit-bridge" \
-  --base-branch="release/2026.7.4"
-
-# Test on a single project first before running on the whole group
-docker run --rm -v $(pwd)/.env:/app/.env bump-all \
-  "symfony/*:7.4.*" \
-  --exclude="symfony/flex" \
-  --exclude="symfony/monolog-bundle" \
-  --exclude="symfony/maker-bundle" \
-  --exclude="symfony/phpunit-bridge" \
+  --symfony=7.4 \
   --base-branch="release/2026.7.4" \
   --project="my-service"
 
-# Target a specific branch
-docker run --rm -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*" \
-  --base-branch="release/2025.1.0"
+# Update multiple specific packages
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  "symfony/messenger:7.4.*" \
+  --base-branch="release/2026.7.4"
 
 # Show every project scanned (verbose)
 docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0" -v
 ```
-
-> **Note on `symfony/*` wildcard**: some Symfony ecosystem packages have **independent version numbers** and must be excluded:
-> - `symfony/flex` → 2.x
-> - `symfony/monolog-bundle` → 3.x / 4.x
-> - `symfony/maker-bundle` → 1.x
-> - `symfony/phpunit-bridge` → follows its own cycle
->
-> Use `--exclude` for each of them when using the `symfony/*` wildcard.
 
 ### All options
 
@@ -123,11 +97,52 @@ docker run --rm -v $(pwd)/.env:/app/.env bump-all "vendor/package:^3.0" -v
 | `--base-branch`           | `GITLAB_BASE_BRANCH`   | Branch to update and open MR against (default: `master`) |
 | `--project`               | —                      | Restrict to one project by name or path                  |
 | `--php-version`           | `COMPOSER_PHP_VERSION` | Pin PHP version for `composer update` resolution         |
+| `--symfony=X.Y`           | —                      | Symfony major migration shortcut (see below)             |
 | `--add-missing`           | —                      | Add packages not yet present in `composer.json` (upsert mode) |
 | `--exclude`               | —                      | Exclude a package from wildcard matching (repeatable)    |
 | `--with-all-dependencies` | —                      | Allow composer to upgrade/downgrade transitive dependencies (`-W`) |
 
 > All options can be set in `.env` — CLI flags override env vars.
+
+---
+
+## Symfony major version migration
+
+Migrating from Symfony 6.4 → 7.4 across all your projects? Use the `--symfony` shortcut:
+
+```bash
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --base-branch="release/2026.7.4" \
+  --project="my-service"   # test on one project first
+```
+
+This single option automatically:
+- Updates **all `symfony/*` packages** present in each `composer.json` to `7.4.*`
+- **Auto-excludes** packages with independent versioning (not following symfony framework version):
+  - `symfony/flex` → 2.x
+  - `symfony/monolog-bundle` → 3.x/4.x
+  - `symfony/maker-bundle` → 1.x
+  - `symfony/webpack-encore-bundle` → 1.x/2.x
+- Updates **`extra.symfony.require`** to `7.4.*` (required by Symfony Flex, [as per docs](https://symfony.com/doc/current/setup/upgrade_major.html))
+- Enables **`--with-all-dependencies`** automatically ([recommended by Symfony upgrade guide](https://symfony.com/doc/current/setup/upgrade_major.html#dependency-errors))
+
+Once validated on one project, run on all:
+
+```bash
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --base-branch="release/2026.7.4"
+```
+
+To add extra exclusions beyond the defaults:
+
+```bash
+docker run --rm -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --exclude="symfony/my-custom-bundle" \
+  --base-branch="release/2026.7.4"
+```
 
 # Update modes
 
@@ -137,10 +152,10 @@ Use `--add-missing` to also **add packages** that are not yet present:
 
 ```bash
 # Only updates projects that already have symfony/http-client
-php app/console composer:update "symfony/http-client:7.4.*"
+docker run --rm -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*"
 
 # Adds symfony/http-client to every project, even those that don't have it yet
-php app/console composer:update "symfony/http-client:7.4.*" --add-missing
+docker run --rm -v $(pwd)/.env:/app/.env bump-all "symfony/http-client:7.4.*" --add-missing
 ```
 
 ---

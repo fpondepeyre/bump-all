@@ -9,11 +9,25 @@ use Gitlab\Client;
 
 class BumpCommand extends Command
 {
+    /**
+     * Symfony ecosystem packages that have their own independent versioning
+     * and must NOT be updated to match the Symfony framework version.
+     * See: https://symfony.com/doc/current/setup/upgrade_major.html
+     */
+    private const SYMFONY_INDEPENDENT_PACKAGES = [
+        'symfony/flex',            // 2.x — manages recipes, not the framework
+        'symfony/monolog-bundle',  // 3.x/4.x — independent versioning
+        'symfony/maker-bundle',    // 1.x — independent versioning
+        'symfony/webpack-encore-bundle', // 1.x/2.x — independent versioning
+        'symfony/ux-chartjs',      // independent versioning
+        'symfony/ux-twig-component', // independent versioning
+    ];
+
     protected function configure()
     {
         $this->setName('composer:update');
         $this->setDescription('Update Composer dependencies across all projects in a GitLab group and open a MR for each');
-        $this->addArgument('packages', InputArgument::IS_ARRAY | InputArgument::REQUIRED, 'Packages to update, format: vendor/name:version (e.g. symfony/http-client:7.4.* symfony/console:7.4.*)');
+        $this->addArgument('packages', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Packages to update, format: vendor/name:version (e.g. symfony/http-client:7.4.* symfony/console:7.4.*)');
         $this->addOption('token', 't', InputOption::VALUE_OPTIONAL, 'GitLab private token (or GITLAB_TOKEN env var)');
         $this->addOption('group', 'g', InputOption::VALUE_OPTIONAL, 'GitLab group path or ID (or GITLAB_GROUP env var)');
         $this->addOption('gitlab-url', null, InputOption::VALUE_OPTIONAL, 'GitLab instance URL (or GITLAB_URL env var)');
@@ -23,6 +37,7 @@ class BumpCommand extends Command
         $this->addOption('add-missing', null, InputOption::VALUE_NONE, 'Also add packages that are not yet present in composer.json (upsert mode). Default: only update existing packages.');
         $this->addOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Pass --with-all-dependencies to composer update, allowing upgrades of transitive dependencies.');
         $this->addOption('exclude', null, InputOption::VALUE_IS_ARRAY | InputOption::VALUE_REQUIRED, 'Exclude a package from being updated (can be repeated, e.g. --exclude=symfony/flex --exclude=symfony/monolog-bundle).');
+        $this->addOption('symfony', null, InputOption::VALUE_REQUIRED, 'Shortcut for Symfony major migration: updates all symfony/* packages to the given version (e.g. --symfony=7.4). Automatically excludes packages with independent versioning and enables --with-all-dependencies.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -31,21 +46,40 @@ class BumpCommand extends Command
         $group      = $input->getOption('group')       ?: ($_ENV['GITLAB_GROUP']          ?? null);
         $gitlabUrl  = $input->getOption('gitlab-url')  ?: ($_ENV['GITLAB_URL']            ?? null);
         $baseBranch = $input->getOption('base-branch') ?: ($_ENV['GITLAB_BASE_BRANCH']    ?? 'master');
-        $filterProject      = $input->getOption('project');
-        $phpVersion         = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
-        $addMissing         = $input->getOption('add-missing');
-        $withAllDeps        = $input->getOption('with-all-dependencies');
-        $excludes           = $input->getOption('exclude');
+        $filterProject = $input->getOption('project');
+        $phpVersion    = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
+        $addMissing    = $input->getOption('add-missing');
+        $withAllDeps   = $input->getOption('with-all-dependencies');
+        $excludes      = $input->getOption('exclude');
+        $symfonyShortcut = $input->getOption('symfony');
 
-        // Parse packages: each arg is "vendor/name:version"
-        $packages = [];
-        foreach ($input->getArgument('packages') as $arg) {
-            if (!str_contains($arg, ':')) {
-                $output->writeln("<error>Invalid package format '$arg'. Expected vendor/name:version (e.g. symfony/http-client:7.4.*)</error>");
+        // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
+        if ($symfonyShortcut !== null) {
+            $version     = rtrim($symfonyShortcut, '.*') . '.*';
+            $packages    = ['symfony/*' => $version];
+            $excludes    = array_unique(array_merge($excludes, self::SYMFONY_INDEPENDENT_PACKAGES));
+            $withAllDeps = true;
+            $output->writeln(sprintf(
+                '<info>Symfony migration mode: symfony/* → %s</info>  (excluding: %s)',
+                $version,
+                implode(', ', $excludes)
+            ));
+        } else {
+            // Parse packages: each arg is "vendor/name:version"
+            $packages = [];
+            foreach ($input->getArgument('packages') as $arg) {
+                if (!str_contains($arg, ':')) {
+                    $output->writeln("<error>Invalid package format '$arg'. Expected vendor/name:version (e.g. symfony/http-client:7.4.*)</error>");
+                    return Command::FAILURE;
+                }
+                [$name, $version] = explode(':', $arg, 2);
+                $packages[$name] = $version;
+            }
+
+            if (empty($packages)) {
+                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y</error>');
                 return Command::FAILURE;
             }
-            [$name, $version] = explode(':', $arg, 2);
-            $packages[$name] = $version;
         }
 
         if (!$token) {
