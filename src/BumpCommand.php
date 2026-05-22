@@ -44,6 +44,7 @@ class BumpCommand extends Command
         $this->addOption('exclude', null, InputOption::VALUE_IS_ARRAY | InputOption::VALUE_REQUIRED, 'Exclude a package from being updated (can be repeated, e.g. --exclude=symfony/flex --exclude=symfony/monolog-bundle).');
         $this->addOption('symfony', null, InputOption::VALUE_REQUIRED, 'Shortcut for Symfony major migration: updates all symfony/* packages to the given version (e.g. --symfony=7.4). Automatically excludes packages with independent versioning and enables --with-all-dependencies.');
         $this->addOption('interactive', 'i', InputOption::VALUE_NONE, 'Interactive mode: pick projects, packages and versions step by step.');
+        $this->addOption('update-lock', null, InputOption::VALUE_NONE, 'Update composer.lock to latest versions within existing constraints (runs composer update without modifying composer.json).');
         $this->addOption('no-ssl-verify', null, InputOption::VALUE_NONE, 'Disable SSL certificate verification (useful for self-signed or internal CA certificates). Can also be set via NO_SSL_VERIFY=true in .env.');
     }
 
@@ -60,6 +61,7 @@ class BumpCommand extends Command
         $excludes        = $input->getOption('exclude');
         $symfonyShortcut = $input->getOption('symfony');
         $interactive     = $input->getOption('interactive');
+        $updateLock      = $input->getOption('update-lock');
         $noSslVerify     = $input->getOption('no-ssl-verify') || filter_var($_ENV['NO_SSL_VERIFY'] ?? 'false', FILTER_VALIDATE_BOOLEAN);
 
         // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
@@ -85,8 +87,8 @@ class BumpCommand extends Command
                 $packages[$name] = $version;
             }
 
-            if (empty($packages) && !$interactive) {
-                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y or -i for interactive mode.</error>');
+            if (empty($packages) && !$interactive && !$updateLock) {
+                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y, --update-lock, or -i for interactive mode.</error>');
                 return Command::FAILURE;
             }
         }
@@ -120,7 +122,7 @@ class BumpCommand extends Command
         // Interactive mode: pick projects, packages and versions interactively
         $selectedProjectIds = null;
         if ($interactive) {
-            [$packages, $selectedProjectIds, $addMissing, $withAllDeps] = $this->runInteractive(
+            [$packages, $selectedProjectIds, $addMissing, $withAllDeps, $updateLock] = $this->runInteractive(
                 $input, $output, $client, $group, $baseBranch, $phpVersion
             );
             if ($packages === null) {
@@ -129,8 +131,12 @@ class BumpCommand extends Command
         }
 
         $output->writeln("Scanning group <info>$group</info> on <info>$gitlabUrl</info>");
-        $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
-        $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
+        if ($updateLock) {
+            $output->writeln("Mode: <info>update-lock</info> — composer update within existing constraints  (branch: <info>$baseBranch</info>)");
+        } else {
+            $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
+            $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
+        }
         if ($filterProject) {
             $output->writeln("Filtering on project: <info>$filterProject</info>");
         }
@@ -182,8 +188,145 @@ class BumpCommand extends Command
                     continue;
                 }
 
-                $composer     = json_decode(base64_decode($composerFile['content']), true);
+                $composer = json_decode(base64_decode($composerFile['content']), true);
 
+                // ── UPDATE-LOCK MODE ──────────────────────────────────────────────────
+                if ($updateLock) {
+                    // Fetch existing composer.lock for comparison
+                    $composerLockSha     = null;
+                    $composerLockContent = null;
+                    try {
+                        $lockFile            = $client->repositoryFiles()->getFile($projectId, 'composer.lock', $baseBranch);
+                        $composerLockSha     = $lockFile['blob_id'];
+                        $composerLockContent = base64_decode($lockFile['content']);
+                    } catch (\Exception $e) {
+                        // No composer.lock yet
+                    }
+
+                    try {
+                        $branchInfo = $client->repositories()->branch($projectId, $baseBranch);
+                        $baseSha    = $branchInfo['commit']['id'];
+                    } catch (\Exception $e) {
+                        $output->writeln("  <error>Cannot get branch '$baseBranch': " . $e->getMessage() . '</error>');
+                        continue;
+                    }
+
+                    $tmpDir   = '/tmp/bump-' . $projectPath;
+                    $authFile = $tmpDir . '-auth.json';
+                    $gitHost  = parse_url($gitlabUrl, PHP_URL_HOST);
+                    exec('rm -rf ' . escapeshellarg($tmpDir));
+
+                    $cloneUrl = preg_replace('#^(https?://)#', '$1oauth2:' . $token . '@', $project['http_url_to_repo']);
+                    $cloneOut = [];
+                    exec(
+                        'git clone -b ' . escapeshellarg($baseBranch) . ' ' . escapeshellarg($cloneUrl) . ' ' . escapeshellarg($tmpDir) . ' 2>&1',
+                        $cloneOut, $cloneRet
+                    );
+                    if ($cloneRet !== 0) {
+                        $output->writeln('  <error>Clone failed: ' . implode(' ', $cloneOut) . '</error>');
+                        continue;
+                    }
+
+                    file_put_contents($authFile, json_encode(['gitlab-token' => [$gitHost => $token]]));
+                    chmod($authFile, 0600);
+
+                    if ($phpVersion) {
+                        exec('cd ' . escapeshellarg($tmpDir) . ' && composer config platform.php ' . escapeshellarg($phpVersion) . ' 2>&1');
+                    }
+
+                    $composerFlags = '--no-interaction --no-scripts' . ($withAllDeps ? ' --with-all-dependencies' : '');
+                    $composerOut   = [];
+                    exec(
+                        'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' 2>&1',
+                        $composerOut, $composerRet
+                    );
+
+                    if ($composerRet !== 0) {
+                        $missingExts = [];
+                        foreach ($composerOut as $line) {
+                            if (preg_match('/requires? (ext-[\w]+)/', $line, $m)) {
+                                $missingExts[$m[1]] = true;
+                            }
+                        }
+                        if (!empty($missingExts)) {
+                            $ignoreFlags = implode(' ', array_map(fn($ext) => '--ignore-platform-req=' . escapeshellarg($ext), array_keys($missingExts)));
+                            $composerOut = [];
+                            exec(
+                                'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' ' . $ignoreFlags . ' 2>&1',
+                                $composerOut, $composerRet
+                            );
+                        }
+                    }
+
+                    if ($phpVersion) {
+                        exec('cd ' . escapeshellarg($tmpDir) . ' && composer config --unset platform 2>&1');
+                    }
+
+                    if ($composerRet !== 0) {
+                        $output->writeln('  <error>composer update failed:</error>');
+                        $output->writeln(implode("\n", $composerOut));
+                        exec('rm -rf ' . escapeshellarg($tmpDir));
+                        @unlink($authFile);
+                        continue;
+                    }
+
+                    $newComposerLock = file_exists($tmpDir . '/composer.lock') ? file_get_contents($tmpDir . '/composer.lock') : null;
+                    exec('rm -rf ' . escapeshellarg($tmpDir));
+                    @unlink($authFile);
+
+                    if ($newComposerLock === null || $newComposerLock === $composerLockContent) {
+                        $output->writeln('already up to date, skipping.');
+                        continue;
+                    }
+
+                    $branch = 'bump-lock-update';
+                    try { $client->repositories()->deleteBranch($projectId, $branch); } catch (\Exception $e) {}
+                    try {
+                        $client->repositories()->createBranch($projectId, $branch, $baseSha);
+                    } catch (\Exception $e) {
+                        $output->writeln('  <error>Cannot create branch: ' . $e->getMessage() . '</error>');
+                        continue;
+                    }
+
+                    $output->writeln('lock updated ...');
+
+                    try {
+                        $action = $composerLockSha !== null ? 'updateFile' : 'createFile';
+                        $client->repositoryFiles()->$action($projectId, [
+                            'file_path'      => 'composer.lock',
+                            'branch'         => $branch,
+                            'content'        => $newComposerLock,
+                            'commit_message' => 'chore: update composer.lock to latest patch/minor versions',
+                            'encoding'       => 'text',
+                        ]);
+                    } catch (\Exception $e) {
+                        $output->writeln('  <error>Cannot commit composer.lock: ' . $e->getMessage() . '</error>');
+                        continue;
+                    }
+
+                    $mrTitle       = 'chore: update composer.lock to latest patch/minor versions';
+                    $mrDescription = "## 🤖 Automated dependency update\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### What changed\n\nRan `composer update` without modifying `composer.json` — all packages updated to the latest versions allowed by the existing constraints (patch and minor updates only).\n\n### Why\n\nThis is a routine lock file refresh. Please review the diff and make sure the CI passes before merging.";
+
+                    try {
+                        $client->mergeRequests()->create($projectId, $branch, $baseBranch, $mrTitle, [
+                            'description'          => $mrDescription,
+                            'remove_source_branch' => true,
+                        ]);
+                        $output->writeln('  MR created successfully.');
+                        $totalUpdated++;
+                    } catch (\Exception $e) {
+                        $msg = $e->getMessage();
+                        if (str_contains($msg, 'already exists') || str_contains($msg, 'duplicate')) {
+                            $output->writeln('  MR already exists.');
+                            $totalUpdated++;
+                        } else {
+                            $output->writeln('  <error>Cannot create MR: ' . $msg . '</error>');
+                        }
+                    }
+                    continue;
+                }
+
+                // ── BUMP SPECIFIC PACKAGES MODE ───────────────────────────────────────
                 $matchedPackages = [];
                 $addedPackages   = [];
 
@@ -453,8 +596,8 @@ class BumpCommand extends Command
     }
 
     /**
-     * Interactive wizard: select projects → packages → versions → mode.
-     * Returns [packages, selectedProjectIds, addMissing, withAllDeps] or [null, ...] on abort.
+     * Interactive wizard: select projects → (optionally) packages → versions → mode.
+     * Returns [packages, selectedProjectIds, addMissing, withAllDeps, updateLock] or [null, ...] on abort.
      */
     private function runInteractive(InputInterface $input, OutputInterface $output, Client $client, string $group, string $baseBranch, ?string $phpVersion): array
     {
@@ -465,6 +608,13 @@ class BumpCommand extends Command
             '  <comment>①</comment> Select projects   <comment>②</comment> Select packages   <comment>③</comment> Set versions   <comment>④</comment> Configure options',
             '',
         ]);
+
+        // ── Mode selection ────────────────────────────────────────────────────
+        $modeChoice = $io->choice('What do you want to do?', [
+            'bump'        => 'Bump specific packages to a target version',
+            'update-lock' => 'Update composer.lock to latest (within existing constraints)',
+        ], 'bump');
+        $updateLock = $modeChoice === 'update-lock';
 
         // ── Step 1: Fetch & select projects ──────────────────────────────────
         $io->section('① Projects');
@@ -479,7 +629,7 @@ class BumpCommand extends Command
                 ]);
             } catch (\Exception $e) {
                 $io->error('Cannot fetch projects: ' . $e->getMessage());
-                return [null, null, false, false];
+                return [null, null, false, false, false];
             }
             $allProjects = array_merge($allProjects, $batch);
             $page++;
@@ -487,7 +637,7 @@ class BumpCommand extends Command
 
         if (empty($allProjects)) {
             $io->error('No projects found in group.');
-            return [null, null, false, false];
+            return [null, null, false, false, false];
         }
 
         $io->success(sprintf('%d project(s) found in group.', count($allProjects)));
@@ -525,90 +675,90 @@ class BumpCommand extends Command
 
         $io->success(sprintf('%d project(s) selected: %s', count($selectedProjects), implode(', ', array_column($selectedProjects, 'path'))));
 
-        // ── Step 2: Fetch packages with current versions ──────────────────────
-        $io->section('② Packages');
-        $io->text(sprintf('Fetching <info>composer.json</info> from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
-        $io->newLine();
-
-        // progressIterate() handles the progress bar automatically
+        // ── Step 2 & 3: Packages + Versions (skipped in update-lock mode) ────────
+        $packages   = [];
+        $addMissing = false;
         $allPackages = [];
-        foreach ($io->progressIterate($selectedProjects) as $project) {
-            try {
-                $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
-                $composer = json_decode(base64_decode($file['content']), true);
-                foreach (['require', 'require-dev'] as $section) {
-                    foreach ($composer[$section] ?? [] as $pkg => $ver) {
-                        if ($pkg === 'php' || str_starts_with($pkg, 'ext-')) continue;
-                        if (!isset($allPackages[$pkg])) {
-                            $allPackages[$pkg] = ['current' => $ver, 'count' => 0];
+
+        if (!$updateLock) {
+            $io->section('② Packages');
+            $io->text(sprintf('Fetching <info>composer.json</info> from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
+            $io->newLine();
+
+            // progressIterate() handles the progress bar automatically
+            foreach ($io->progressIterate($selectedProjects) as $project) {
+                try {
+                    $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
+                    $composer = json_decode(base64_decode($file['content']), true);
+                    foreach (['require', 'require-dev'] as $section) {
+                        foreach ($composer[$section] ?? [] as $pkg => $ver) {
+                            if ($pkg === 'php' || str_starts_with($pkg, 'ext-')) continue;
+                            if (!isset($allPackages[$pkg])) {
+                                $allPackages[$pkg] = ['current' => $ver, 'count' => 0];
+                            }
+                            $allPackages[$pkg]['count']++;
                         }
-                        $allPackages[$pkg]['count']++;
                     }
+                } catch (\Exception $e) {
+                    // no composer.json on this branch — silently skip
                 }
-            } catch (\Exception $e) {
-                // no composer.json on this branch — silently skip
             }
-        }
 
-        if (empty($allPackages)) {
-            $io->error('No packages found in the selected projects on branch ' . $baseBranch);
-            return [null, null, false, false];
-        }
+            if (empty($allPackages)) {
+                $io->error('No packages found in the selected projects on branch ' . $baseBranch);
+                return [null, null, false, false, false];
+            }
 
-        ksort($allPackages);
-        $packageList = array_keys($allPackages);
+            ksort($allPackages);
+            $packageList = array_keys($allPackages);
 
-        // Show package table with extra context (current version + how many projects use it)
-        $io->table(
-            ['#', 'Package', 'Version (first seen)', '# projects'],
-            array_map(fn($i, $pkg) => [
-                $i + 1,
-                $pkg,
-                $allPackages[$pkg]['current'],
-                $allPackages[$pkg]['count'],
-            ], array_keys($packageList), $packageList)
-        );
+            // Show package table with extra context (current version + how many projects use it)
+            $io->table(
+                ['#', 'Package', 'Version (first seen)', '# projects'],
+                array_map(fn($i, $pkg) => [
+                    $i + 1,
+                    $pkg,
+                    $allPackages[$pkg]['current'],
+                    $allPackages[$pkg]['count'],
+                ], array_keys($packageList), $packageList)
+            );
 
-        // Package selection: autocomplete with Tab, one at a time, empty = done
-        $selectedPackageNames = $this->autocompleteMultiSelect(
-            $input,
-            $output,
-            $io,
-            $packageList,
-        );
+            // Package selection: autocomplete with Tab, one at a time, empty = done
+            $selectedPackageNames = $this->autocompleteMultiSelect($input, $output, $io, $packageList);
 
-        if (empty($selectedPackageNames)) {
-            $io->warning('No packages selected. Aborted.');
-            return [null, null, false, false];
-        }
+            if (empty($selectedPackageNames)) {
+                $io->warning('No packages selected. Aborted.');
+                return [null, null, false, false, false];
+            }
 
-        // ── Step 3: Version per selected package ──────────────────────────────
-        $io->section('③ Versions');
+            // ── Step 3: Version per selected package ──────────────────────────────
+            $io->section('③ Versions');
 
-        $packages = [];
-        foreach ($selectedPackageNames as $pkg) {
-            $current = $allPackages[$pkg]['current'] ?? 'not present';
-            // Plain-text prompt — ANSI markup in readline prompts corrupts input
-            $io->write(sprintf('  %s (currently %s): ', $pkg, $current));
-            $q = new Question('');
-            $q->setValidator(fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.'));
-            $version = $this->getHelper('question')->ask($input, $output, $q);
-            $packages[$pkg] = $version;
-        }
+            foreach ($selectedPackageNames as $pkg) {
+                $current = $allPackages[$pkg]['current'] ?? 'not present';
+                // Plain-text prompt — ANSI markup in readline prompts corrupts input
+                $io->write(sprintf('  %s (currently %s): ', $pkg, $current));
+                $q = new Question('');
+                $q->setValidator(fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.'));
+                $version = $this->getHelper('question')->ask($input, $output, $q);
+                $packages[$pkg] = $version;
+            }
+
+            $mode = $io->choice(
+                'Update mode',
+                [
+                    'update-only — skip projects where the package is absent',
+                    'upsert — also add the package if missing',
+                ],
+                'update-only — skip projects where the package is absent',
+            );
+            $addMissing = str_starts_with($mode, 'upsert');
+        } // end if (!$updateLock)
 
         // ── Step 4: Options ───────────────────────────────────────────────────
         $io->section('④ Options');
 
-        $mode = $io->choice(
-            'Update mode',
-            [
-                'update-only — skip projects where the package is absent',
-                'upsert — also add the package if missing',
-            ],
-            'update-only — skip projects where the package is absent',
-        );
-        $addMissing  = str_starts_with($mode, 'upsert');
-        $withAllDeps = $io->confirm('Use --with-all-dependencies? (recommended for major migrations)', false);
+        $withAllDeps = $io->confirm('Use --with-all-dependencies?', false);
 
         // ── Summary + confirm ─────────────────────────────────────────────────
         $io->section('✅  Summary');
@@ -616,27 +766,29 @@ class BumpCommand extends Command
         $summaryRows = [
             ['Branch'                  => $baseBranch],
             ['Projects'                => implode(', ', array_column($selectedProjects, 'path'))],
-            ['Mode'                    => $addMissing ? 'upsert (add if missing)' : 'update-only'],
+            ['Mode'                    => $updateLock ? 'update-lock (composer update within constraints)' : ($addMissing ? 'upsert (add if missing)' : 'update-only')],
             ['--with-all-dependencies' => $withAllDeps ? '✓ yes' : '✗ no'],
         ];
         $io->definitionList(...$summaryRows);
 
-        $io->table(
-            ['Package', 'Current', '→', 'Target'],
-            array_map(fn($pkg, $ver) => [
-                $pkg,
-                $allPackages[$pkg]['current'],
-                '→',
-                "<info>$ver</info>",
-            ], array_keys($packages), $packages)
-        );
+        if (!$updateLock) {
+            $io->table(
+                ['Package', 'Current', '→', 'Target'],
+                array_map(fn($pkg, $ver) => [
+                    $pkg,
+                    $allPackages[$pkg]['current'] ?? 'not present',
+                    '→',
+                    $ver,
+                ], array_keys($packages), $packages)
+            );
+        }
 
         if (!$io->confirm('🚀  Proceed and create MRs?', false)) {
             $io->warning('Aborted by user.');
-            return [null, null, false, false];
+            return [null, null, false, false, false];
         }
 
-        return [$packages, array_column($selectedProjects, 'id'), $addMissing, $withAllDeps];
+        return [$packages, array_column($selectedProjects, 'id'), $addMissing, $withAllDeps, $updateLock];
     }
 
     /**
