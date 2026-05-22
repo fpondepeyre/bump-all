@@ -90,6 +90,43 @@ Four modes are available:
 
 ---
 
+## Testing (start here)
+
+> 💡 Always test on a **single project** first with `--project` to avoid creating MRs on all 25 projects at once.
+
+```bash
+# Interactive wizard — try all modes step by step
+docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all -i
+
+# Check outdated on one project (fast, ~30s)
+docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --check-outdated \
+  --base-branch="release/2026.7.4" \
+  --project="service-search"
+
+# Bump a specific package on one project
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" \
+  --base-branch="release/2026.7.4" \
+  --project="service-search"
+
+# Refresh lock file on one project
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock \
+  --base-branch="release/2026.7.4" \
+  --project="service-search"
+
+# Audit CVE on one project
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --audit \
+  --base-branch="release/2026.7.4" \
+  --project="service-search"
+```
+
+Once happy with the result on one project, remove `--project` to roll out to all projects.
+
+---
+
 ## Common scenarios
 
 #### Discover what's outdated and pick what to update
