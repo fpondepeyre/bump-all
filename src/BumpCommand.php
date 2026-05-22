@@ -106,7 +106,8 @@ class BumpCommand extends Command
         $httpClient = new \GuzzleHttp\Client([
             'verify' => !$noSslVerify,
         ]);
-        $client = new Client(new \Http\Adapter\Guzzle7\Client($httpClient));
+        $builder = new \Gitlab\HttpClient\Builder(new \Http\Adapter\Guzzle7\Client($httpClient));
+        $client  = new Client($builder);
         $client->setUrl($gitlabUrl);
         $client->authenticate($token, Client::AUTH_HTTP_TOKEN);
 
