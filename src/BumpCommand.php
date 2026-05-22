@@ -5,6 +5,9 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Question\Question;
+use Symfony\Component\Console\Question\ChoiceQuestion;
+use Symfony\Component\Console\Question\ConfirmationQuestion;
 use Gitlab\Client;
 
 class BumpCommand extends Command
@@ -38,6 +41,7 @@ class BumpCommand extends Command
         $this->addOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Pass --with-all-dependencies to composer update, allowing upgrades of transitive dependencies.');
         $this->addOption('exclude', null, InputOption::VALUE_IS_ARRAY | InputOption::VALUE_REQUIRED, 'Exclude a package from being updated (can be repeated, e.g. --exclude=symfony/flex --exclude=symfony/monolog-bundle).');
         $this->addOption('symfony', null, InputOption::VALUE_REQUIRED, 'Shortcut for Symfony major migration: updates all symfony/* packages to the given version (e.g. --symfony=7.4). Automatically excludes packages with independent versioning and enables --with-all-dependencies.');
+        $this->addOption('interactive', 'i', InputOption::VALUE_NONE, 'Interactive mode: pick projects, packages and versions step by step.');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -46,12 +50,13 @@ class BumpCommand extends Command
         $group      = $input->getOption('group')       ?: ($_ENV['GITLAB_GROUP']          ?? null);
         $gitlabUrl  = $input->getOption('gitlab-url')  ?: ($_ENV['GITLAB_URL']            ?? null);
         $baseBranch = $input->getOption('base-branch') ?: ($_ENV['GITLAB_BASE_BRANCH']    ?? 'master');
-        $filterProject = $input->getOption('project');
-        $phpVersion    = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
-        $addMissing    = $input->getOption('add-missing');
-        $withAllDeps   = $input->getOption('with-all-dependencies');
-        $excludes      = $input->getOption('exclude');
+        $filterProject   = $input->getOption('project');
+        $phpVersion      = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
+        $addMissing      = $input->getOption('add-missing');
+        $withAllDeps     = $input->getOption('with-all-dependencies');
+        $excludes        = $input->getOption('exclude');
         $symfonyShortcut = $input->getOption('symfony');
+        $interactive     = $input->getOption('interactive');
 
         // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
         if ($symfonyShortcut !== null) {
@@ -99,6 +104,17 @@ class BumpCommand extends Command
         $client->setUrl($gitlabUrl);
         $client->authenticate($token, Client::AUTH_HTTP_TOKEN);
 
+        // Interactive mode: pick projects, packages and versions interactively
+        $selectedProjectIds = null;
+        if ($interactive) {
+            [$packages, $selectedProjectIds, $addMissing, $withAllDeps] = $this->runInteractive(
+                $input, $output, $client, $group, $baseBranch
+            );
+            if ($packages === null) {
+                return Command::FAILURE;
+            }
+        }
+
         $output->writeln("Scanning group <info>$group</info> on <info>$gitlabUrl</info>");
         $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
         $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
@@ -136,6 +152,9 @@ class BumpCommand extends Command
                 $projectPath = $project['path'];
 
                 if ($filterProject !== null && $projectName !== $filterProject && $projectPath !== $filterProject) {
+                    continue;
+                }
+                if ($selectedProjectIds !== null && !in_array($projectId, $selectedProjectIds, true)) {
                     continue;
                 }
 
@@ -413,5 +432,161 @@ class BumpCommand extends Command
         $output->writeln("Done. Scanned: $totalScanned project(s), updated: $totalUpdated.");
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * Interactive wizard: select projects → packages → versions → mode.
+     * Returns [packages, selectedProjectIds, addMissing, withAllDeps] or [null, ...] on abort.
+     */
+    private function runInteractive(InputInterface $input, OutputInterface $output, Client $client, string $group, string $baseBranch): array
+    {
+        $helper = $this->getHelper('question');
+
+        // ── Step 1: Fetch all projects ────────────────────────────────────────
+        $output->writeln('<info>Fetching projects from GitLab...</info>');
+        $allProjects = [];
+        $page = 1;
+        do {
+            try {
+                $batch = $client->groups()->projects($group, [
+                    'per_page' => 100, 'page' => $page, 'include_subgroups' => true,
+                ]);
+            } catch (\Exception $e) {
+                $output->writeln('<error>Cannot fetch projects: ' . $e->getMessage() . '</error>');
+                return [null, null, false, false];
+            }
+            $allProjects = array_merge($allProjects, $batch);
+            $page++;
+        } while (count($batch) === 100);
+
+        if (empty($allProjects)) {
+            $output->writeln('<error>No projects found in group.</error>');
+            return [null, null, false, false];
+        }
+
+        // ── Step 2: Select projects ───────────────────────────────────────────
+        $output->writeln('');
+        $output->writeln(sprintf('<info>%d project(s) found:</info>', count($allProjects)));
+        foreach ($allProjects as $i => $p) {
+            $output->writeln(sprintf('  [<comment>%d</comment>] %s', $i + 1, $p['path_with_namespace']));
+        }
+        $output->writeln('');
+
+        $q = new Question('Select projects (e.g. <comment>1,3,5</comment> or <comment>all</comment>): ');
+        $q->setValidator(function ($v) use ($allProjects) {
+            if (strtolower(trim($v)) === 'all') return $v;
+            foreach (array_map('intval', explode(',', $v)) as $idx) {
+                if ($idx < 1 || $idx > count($allProjects)) {
+                    throw new \RuntimeException("Invalid index: $idx");
+                }
+            }
+            return $v;
+        });
+        $selection = $helper->ask($input, $output, $q);
+
+        if (strtolower(trim($selection)) === 'all') {
+            $selectedProjects = $allProjects;
+        } else {
+            $selectedProjects = [];
+            foreach (array_map('intval', explode(',', $selection)) as $idx) {
+                $selectedProjects[] = $allProjects[$idx - 1];
+            }
+        }
+
+        // ── Step 3: Aggregate packages from selected projects ─────────────────
+        $output->writeln('');
+        $output->writeln(sprintf('<info>Fetching composer.json from %d project(s)...</info>', count($selectedProjects)));
+        $allPackages = [];
+        foreach ($selectedProjects as $project) {
+            try {
+                $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
+                $composer = json_decode(base64_decode($file['content']), true);
+                $pkgs     = array_merge(
+                    array_keys($composer['require']     ?? []),
+                    array_keys($composer['require-dev'] ?? [])
+                );
+                foreach ($pkgs as $pkg) {
+                    // Skip php itself and extensions
+                    if ($pkg === 'php' || str_starts_with($pkg, 'ext-')) continue;
+                    $allPackages[$pkg] = true;
+                }
+            } catch (\Exception $e) {
+                $output->writeln(sprintf('  <comment>[%s]</comment> no composer.json on %s, skipping.', $project['path'], $baseBranch));
+            }
+        }
+
+        if (empty($allPackages)) {
+            $output->writeln('<error>No packages found in the selected projects.</error>');
+            return [null, null, false, false];
+        }
+
+        ksort($allPackages);
+        $packageList = array_keys($allPackages);
+
+        // ── Step 4: Select packages ───────────────────────────────────────────
+        $output->writeln('');
+        $output->writeln(sprintf('<info>%d package(s) found across selected projects:</info>', count($packageList)));
+        foreach ($packageList as $i => $pkg) {
+            $output->writeln(sprintf('  [<comment>%d</comment>] %s', $i + 1, $pkg));
+        }
+        $output->writeln('');
+
+        $q = new Question('Select packages to bump (e.g. <comment>1,3,5</comment>): ');
+        $q->setValidator(function ($v) use ($packageList) {
+            foreach (array_map('intval', explode(',', $v)) as $idx) {
+                if ($idx < 1 || $idx > count($packageList)) {
+                    throw new \RuntimeException("Invalid index: $idx");
+                }
+            }
+            return $v;
+        });
+        $pkgSelection = $helper->ask($input, $output, $q);
+        $selectedPkgIndices = array_map('intval', explode(',', $pkgSelection));
+
+        // ── Step 5: Version per package ───────────────────────────────────────
+        $output->writeln('');
+        $packages = [];
+        foreach ($selectedPkgIndices as $idx) {
+            $pkg = $packageList[$idx - 1];
+            $q   = new Question(sprintf('  Version for <info>%s</info>: ', $pkg));
+            $q->setValidator(fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.'));
+            $version        = $helper->ask($input, $output, $q);
+            $packages[$pkg] = $version;
+        }
+
+        // ── Step 6: Update mode ───────────────────────────────────────────────
+        $output->writeln('');
+        $modeQ = new ChoiceQuestion(
+            'Update mode:',
+            ['update-only — skip projects where the package is absent', 'upsert — also add the package if missing'],
+            0
+        );
+        $mode       = $helper->ask($input, $output, $modeQ);
+        $addMissing = str_starts_with($mode, 'upsert');
+
+        // ── Step 7: --with-all-dependencies ──────────────────────────────────
+        $withQ       = new ConfirmationQuestion('Use <comment>--with-all-dependencies</comment> (recommended for major migrations)? [y/N] ', false);
+        $withAllDeps = $helper->ask($input, $output, $withQ);
+
+        // ── Step 8: Summary + confirm ─────────────────────────────────────────
+        $output->writeln('');
+        $output->writeln('<info>─── Summary ───────────────────────────────────────</info>');
+        $output->writeln(sprintf('  Projects : %s', implode(', ', array_column($selectedProjects, 'path'))));
+        foreach ($packages as $pkg => $ver) {
+            $output->writeln(sprintf('  Bump     : <info>%s</info> → <info>%s</info>', $pkg, $ver));
+        }
+        $output->writeln(sprintf('  Mode     : %s', $addMissing ? 'upsert' : 'update-only'));
+        $output->writeln(sprintf('  Branch   : %s', $baseBranch));
+        $output->writeln('<info>───────────────────────────────────────────────────</info>');
+        $output->writeln('');
+
+        $confirm = new ConfirmationQuestion('Proceed and create MRs? [y/N] ', false);
+        if (!$helper->ask($input, $output, $confirm)) {
+            $output->writeln('Aborted.');
+            return [null, null, false, false];
+        }
+
+        $selectedProjectIds = array_column($selectedProjects, 'id');
+        return [$packages, $selectedProjectIds, $addMissing, $withAllDeps];
     }
 }
