@@ -178,13 +178,13 @@ class BumpCommand extends Command
                 }
 
                 $totalScanned++;
-                $output->write("[$projectPath] ");
+                $output->writeln("[$projectPath]");
 
                 // Fetch composer.json
                 try {
                     $composerFile = $client->repositoryFiles()->getFile($projectId, 'composer.json', $baseBranch);
                 } catch (\Exception $e) {
-                    $output->writeln('no composer.json on branch ' . $baseBranch . ', skipping.');
+                    $output->writeln('  no composer.json on branch ' . $baseBranch . ', skipping.');
                     continue;
                 }
 
@@ -273,7 +273,7 @@ class BumpCommand extends Command
                     @unlink($authFile);
 
                     if ($newComposerLock === null || $newComposerLock === $composerLockContent) {
-                        $output->writeln('already up to date, skipping.');
+                        $output->writeln('  already up to date, skipping.');
                         continue;
                     }
 
@@ -286,7 +286,7 @@ class BumpCommand extends Command
                         continue;
                     }
 
-                    $output->writeln('lock updated ...');
+                    $output->writeln('  lock updated ...');
 
                     try {
                         $action = $composerLockSha !== null ? 'updateFile' : 'createFile';
