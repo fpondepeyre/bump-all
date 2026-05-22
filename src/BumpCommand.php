@@ -46,6 +46,7 @@ class BumpCommand extends Command
         $this->addOption('interactive', 'i', InputOption::VALUE_NONE, 'Interactive mode: pick projects, packages and versions step by step.');
         $this->addOption('update-lock', null, InputOption::VALUE_NONE, 'Update composer.lock to latest versions within existing constraints (runs composer update without modifying composer.json).');
         $this->addOption('audit', null, InputOption::VALUE_NONE, 'Audit mode: detect packages with known CVE vulnerabilities (via composer audit) and update only those packages, then create a security MR.');
+        $this->addOption('check-outdated', null, InputOption::VALUE_NONE, 'Scan projects against Packagist, display a table of outdated packages, then interactively select which to bump.');
         $this->addOption('no-ssl-verify', null, InputOption::VALUE_NONE, 'Disable SSL certificate verification (useful for self-signed or internal CA certificates). Can also be set via NO_SSL_VERIFY=true in .env.');
     }
 
@@ -68,6 +69,7 @@ class BumpCommand extends Command
         $interactive     = $input->getOption('interactive');
         $updateLock      = $input->getOption('update-lock');
         $audit           = $input->getOption('audit');
+        $checkOutdated   = $input->getOption('check-outdated');
         $noSslVerify     = $input->getOption('no-ssl-verify') || filter_var($_ENV['NO_SSL_VERIFY'] ?? 'false', FILTER_VALIDATE_BOOLEAN);
 
         // --symfony=7.4 shortcut: replaces manual symfony/* packages + exclusions
@@ -93,8 +95,8 @@ class BumpCommand extends Command
                 $packages[$name] = $version;
             }
 
-            if (empty($packages) && !$interactive && !$updateLock && !$audit) {
-                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y, --update-lock, --audit, or -i for interactive mode.</error>');
+            if (empty($packages) && !$interactive && !$updateLock && !$audit && !$checkOutdated) {
+                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y, --update-lock, --audit, --check-outdated, or -i for interactive mode.</error>');
                 return Command::FAILURE;
             }
         }
@@ -136,13 +138,127 @@ class BumpCommand extends Command
             }
         }
 
+        // ── CHECK OUTDATED PRE-PASS (CLI mode) ────────────────────────────────
+        if ($checkOutdated && !$interactive) {
+            $io = new SymfonyStyle($input, $output);
+            $io->section('🔍 Checking outdated packages');
+
+            $io->text('Fetching projects from GitLab...');
+            $preProjects = [];
+            $prePage     = 1;
+            do {
+                $batch       = $client->groups()->projects($group, ['per_page' => 100, 'page' => $prePage, 'include_subgroups' => true]);
+                $preProjects = array_merge($preProjects, $batch);
+                $prePage++;
+            } while (count($batch) === 100);
+
+            if (!empty($filterProjects)) {
+                $preProjects = array_values(array_filter($preProjects, fn($p) =>
+                    in_array($p['path'], $filterProjects, true) || in_array($p['name'], $filterProjects, true)
+                ));
+            }
+
+            $io->text(sprintf('Fetching packages from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($preProjects), $baseBranch));
+            $io->newLine();
+
+            $packageData = [];
+            foreach ($io->progressIterate($preProjects) as $project) {
+                try {
+                    $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
+                    $composer = json_decode(base64_decode($file['content']), true);
+                } catch (\Exception $e) {
+                    continue;
+                }
+                $installedVersions = [];
+                try {
+                    $lockFile = $client->repositoryFiles()->getFile($project['id'], 'composer.lock', $baseBranch);
+                    $lock     = json_decode(base64_decode($lockFile['content']), true);
+                    foreach (array_merge($lock['packages'] ?? [], $lock['packages-dev'] ?? []) as $pkg) {
+                        $installedVersions[$pkg['name']] = ltrim($pkg['version'], 'v');
+                    }
+                } catch (\Exception $e) {}
+                foreach (['require', 'require-dev'] as $section) {
+                    foreach ($composer[$section] ?? [] as $pkg => $constraint) {
+                        if ($pkg === 'php' || str_starts_with($pkg, 'ext-')) continue;
+                        if (!isset($packageData[$pkg])) {
+                            $packageData[$pkg] = ['constraint' => $constraint, 'installed' => null, 'count' => 0];
+                        }
+                        $packageData[$pkg]['count']++;
+                        if ($packageData[$pkg]['installed'] === null && isset($installedVersions[$pkg])) {
+                            $packageData[$pkg]['installed'] = $installedVersions[$pkg];
+                        }
+                    }
+                }
+            }
+
+            if (empty($packageData)) {
+                $output->writeln('<error>No packages found in selected projects on branch ' . $baseBranch . '</error>');
+                return Command::FAILURE;
+            }
+
+            $io->newLine();
+            $io->text(sprintf('Checking <info>%d</info> package(s) against Packagist...', count($packageData)));
+            $io->newLine();
+
+            $outdated     = [];
+            $privateCount = 0;
+            foreach ($io->progressIterate(array_keys($packageData)) as $pkgName) {
+                $latest = $this->checkPackagistLatest($pkgName);
+                if ($latest === null) { $privateCount++; continue; }
+                $info           = $packageData[$pkgName];
+                $info['latest'] = $latest;
+                $installed      = $info['installed'] ?? null;
+                if ($installed === null || version_compare($installed, $latest, '<')) {
+                    $outdated[$pkgName] = $info;
+                }
+            }
+
+            $io->newLine();
+            if ($privateCount > 0) {
+                $io->text(sprintf('<comment>%d private/unknown package(s) not found on Packagist — skipped</comment>', $privateCount));
+            }
+
+            if (empty($outdated)) {
+                $io->success('All public packages are up to date!');
+                return Command::SUCCESS;
+            }
+
+            ksort($outdated);
+            $io->section(sprintf('%d outdated package(s)', count($outdated)));
+            $tableRows = [];
+            $i = 1;
+            foreach ($outdated as $pkg => $info) {
+                $tableRows[] = [$i++, $pkg, $info['constraint'], $info['installed'] ?? '?', $info['latest'], $info['count']];
+            }
+            $io->table(['#', 'Package', 'Constraint', 'Installed', 'Latest', '# Projects'], $tableRows);
+
+            $selectedNames = $this->autocompleteMultiSelect($input, $output, $io, array_keys($outdated));
+            if (empty($selectedNames)) {
+                $io->warning('No packages selected. Aborted.');
+                return Command::SUCCESS;
+            }
+
+            $io->writeln('');
+            foreach ($selectedNames as $pkg) {
+                $latest  = $outdated[$pkg]['latest'];
+                $parts   = explode('.', $latest);
+                $suggest = count($parts) >= 2 ? $parts[0] . '.' . $parts[1] . '.*' : $latest;
+                $io->write(sprintf('  %s (latest: %s, Enter for %s): ', $pkg, $latest, $suggest));
+                $q = new Question('');
+                $q->setDefault($suggest);
+                $q->setValidator(fn($v) => (trim((string)$v) !== '') ? trim((string)$v) : $suggest);
+                $packages[$pkg] = $this->getHelper('question')->ask($input, $output, $q) ?: $suggest;
+            }
+
+            $checkOutdated = false; // fall through to bump mode
+        }
+
         $output->writeln("Scanning group <info>$group</info> on <info>$gitlabUrl</info>");
         if ($updateLock) {
             $output->writeln("Mode: <info>update-lock</info> — composer update within existing constraints  (branch: <info>$baseBranch</info>)");
         } elseif ($audit) {
             $output->writeln("Mode: <info>audit</info> — detect and fix CVE vulnerabilities  (branch: <info>$baseBranch</info>)");
-        } else {
-            $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
+        } else {            $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
             $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
         }
         if (!empty($filterProjects)) {
@@ -757,8 +873,11 @@ class BumpCommand extends Command
                 $mrTitle       = count($matchedPackages) === 1
                     ? 'Bump: ' . array_key_first($matchedPackages) . ' to ' . reset($matchedPackages)
                     : 'Bump: ' . count($matchedPackages) . ' packages (' . implode(', ', array_keys($matchedPackages)) . ')';
-                $pkgList       = implode("\n", array_map(fn($n, $v) => "- `$n` → `$v`", array_keys($matchedPackages), $matchedPackages));
-                $mrDescription = "## 🤖 Automated dependency update\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### What changed\n\n$pkgList\n\nUpdated in `composer.json`" . ($lockChanged ? " and `composer.lock`" : "") . ".\n\n### Why\n\nThis is a routine dependency bump. Please review the diff and make sure the CI passes before merging.";
+                $pkgList          = implode("\n", array_map(fn($n, $v) => "- `$n` → `$v`", array_keys($matchedPackages), $matchedPackages));
+                $changelogSection = $this->buildChangelogSection(array_keys($matchedPackages), $composerLockContent, $newComposerLock);
+                $mrDescription    = "## 🤖 Automated dependency update\n\nThis MR was automatically created by [bump-all](https://github.com/fpondepeyre/bump-all).\n\n---\n\n### What changed\n\n$pkgList\n\nUpdated in `composer.json`" . ($lockChanged ? " and `composer.lock`" : "") . "."
+                    . ($changelogSection ? "\n\n$changelogSection" : '')
+                    . "\n\n### Why\n\nThis is a routine dependency bump. Please review the diff and make sure the CI passes before merging.";
 
                 // Create MR
                 try {
@@ -804,12 +923,14 @@ class BumpCommand extends Command
 
         // ── Mode selection ────────────────────────────────────────────────────
         $modeChoice = $io->choice('What do you want to do?', [
-            'bump'        => 'Bump specific packages to a target version',
-            'update-lock' => 'Update composer.lock to latest (within existing constraints)',
-            'audit'       => 'Audit and fix CVE security vulnerabilities',
+            'bump'           => 'Bump specific packages to a target version',
+            'update-lock'    => 'Update composer.lock to latest (within existing constraints)',
+            'audit'          => 'Audit and fix CVE security vulnerabilities',
+            'check-outdated' => 'Check Packagist for outdated packages and select which to update',
         ], 'bump');
-        $updateLock = $modeChoice === 'update-lock';
-        $audit      = $modeChoice === 'audit';
+        $updateLock    = $modeChoice === 'update-lock';
+        $audit         = $modeChoice === 'audit';
+        $checkOutdated = $modeChoice === 'check-outdated';
 
         // ── Step 1: Fetch & select projects ──────────────────────────────────
         $io->section('① Projects');
@@ -877,78 +998,168 @@ class BumpCommand extends Command
 
         if (!$updateLock && !$audit) {
             $io->section('② Packages');
-            $io->text(sprintf('Fetching <info>composer.json</info> from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
-            $io->newLine();
 
-            // progressIterate() handles the progress bar automatically
-            foreach ($io->progressIterate($selectedProjects) as $project) {
-                try {
-                    $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
-                    $composer = json_decode(base64_decode($file['content']), true);
+            if ($checkOutdated) {
+                // ── CHECK OUTDATED PATH ───────────────────────────────────────────────
+                $io->text(sprintf('Fetching packages from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
+                $io->newLine();
+
+                $packageData = [];
+                foreach ($io->progressIterate($selectedProjects) as $project) {
+                    try {
+                        $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
+                        $composer = json_decode(base64_decode($file['content']), true);
+                    } catch (\Exception $e) { continue; }
+                    $installedVersions = [];
+                    try {
+                        $lockFile = $client->repositoryFiles()->getFile($project['id'], 'composer.lock', $baseBranch);
+                        $lock     = json_decode(base64_decode($lockFile['content']), true);
+                        foreach (array_merge($lock['packages'] ?? [], $lock['packages-dev'] ?? []) as $pkg) {
+                            $installedVersions[$pkg['name']] = ltrim($pkg['version'], 'v');
+                        }
+                    } catch (\Exception $e) {}
                     foreach (['require', 'require-dev'] as $section) {
-                        foreach ($composer[$section] ?? [] as $pkg => $ver) {
+                        foreach ($composer[$section] ?? [] as $pkg => $constraint) {
                             if ($pkg === 'php' || str_starts_with($pkg, 'ext-')) continue;
-                            if (!isset($allPackages[$pkg])) {
-                                $allPackages[$pkg] = ['current' => $ver, 'count' => 0];
+                            if (!isset($packageData[$pkg])) {
+                                $packageData[$pkg] = ['constraint' => $constraint, 'installed' => null, 'count' => 0];
                             }
-                            $allPackages[$pkg]['count']++;
+                            $packageData[$pkg]['count']++;
+                            if ($packageData[$pkg]['installed'] === null && isset($installedVersions[$pkg])) {
+                                $packageData[$pkg]['installed'] = $installedVersions[$pkg];
+                            }
                         }
                     }
-                } catch (\Exception $e) {
-                    // no composer.json on this branch — silently skip
                 }
-            }
 
-            if (empty($allPackages)) {
-                $io->error('No packages found in the selected projects on branch ' . $baseBranch);
-                return [null, null, false, false, false, false];
-            }
+                if (empty($packageData)) {
+                    $io->error('No packages found on branch ' . $baseBranch);
+                    return [null, null, false, false, false, false];
+                }
 
-            ksort($allPackages);
-            $packageList = array_keys($allPackages);
+                $io->newLine();
+                $io->text(sprintf('Checking <info>%d</info> package(s) against Packagist...', count($packageData)));
+                $io->newLine();
 
-            // Show package table with extra context (current version + how many projects use it)
-            $io->table(
-                ['#', 'Package', 'Version (first seen)', '# projects'],
-                array_map(fn($i, $pkg) => [
-                    $i + 1,
-                    $pkg,
-                    $allPackages[$pkg]['current'],
-                    $allPackages[$pkg]['count'],
-                ], array_keys($packageList), $packageList)
-            );
+                $outdated     = [];
+                $privateCount = 0;
+                foreach ($io->progressIterate(array_keys($packageData)) as $pkgName) {
+                    $latest = $this->checkPackagistLatest($pkgName);
+                    if ($latest === null) { $privateCount++; continue; }
+                    $info = $packageData[$pkgName];
+                    $info['latest'] = $latest;
+                    $installed = $info['installed'] ?? null;
+                    if ($installed === null || version_compare($installed, $latest, '<')) {
+                        $outdated[$pkgName] = $info;
+                    }
+                }
 
-            // Package selection: autocomplete with Tab, one at a time, empty = done
-            $selectedPackageNames = $this->autocompleteMultiSelect($input, $output, $io, $packageList);
+                $io->newLine();
+                if ($privateCount > 0) {
+                    $io->text(sprintf('<comment>%d private/unknown package(s) not on Packagist — skipped</comment>', $privateCount));
+                }
 
-            if (empty($selectedPackageNames)) {
-                $io->warning('No packages selected. Aborted.');
-                return [null, null, false, false, false, false];
-            }
+                if (empty($outdated)) {
+                    $io->success('All public packages are up to date!');
+                    return [null, null, false, false, false, false];
+                }
 
-            // ── Step 3: Version per selected package ──────────────────────────────
-            $io->section('③ Versions');
+                ksort($outdated);
+                $tableRows = [];
+                $i = 1;
+                foreach ($outdated as $pkg => $info) {
+                    $tableRows[] = [$i++, $pkg, $info['constraint'], $info['installed'] ?? '?', $info['latest'], $info['count']];
+                }
+                $io->table(['#', 'Package', 'Constraint', 'Installed', 'Latest', '# Projects'], $tableRows);
 
-            foreach ($selectedPackageNames as $pkg) {
-                $current = $allPackages[$pkg]['current'] ?? 'not present';
-                // Plain-text prompt — ANSI markup in readline prompts corrupts input
-                $io->write(sprintf('  %s (currently %s): ', $pkg, $current));
-                $q = new Question('');
-                $q->setValidator(fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.'));
-                $version = $this->getHelper('question')->ask($input, $output, $q);
-                $packages[$pkg] = $version;
-            }
+                $selectedPackageNames = $this->autocompleteMultiSelect($input, $output, $io, array_keys($outdated));
+                if (empty($selectedPackageNames)) {
+                    $io->warning('No packages selected. Aborted.');
+                    return [null, null, false, false, false, false];
+                }
 
-            $mode = $io->choice(
-                'Update mode',
-                [
+                // ── Versions (pre-filled with latest X.Y.*) ──────────────────────────
+                $io->section('③ Versions');
+                foreach ($selectedPackageNames as $pkg) {
+                    $latest  = $outdated[$pkg]['latest'];
+                    $parts   = explode('.', $latest);
+                    $suggest = count($parts) >= 2 ? $parts[0] . '.' . $parts[1] . '.*' : $latest;
+                    $io->write(sprintf('  %s (latest: %s, Enter for %s): ', $pkg, $latest, $suggest));
+                    $q = new Question('');
+                    $q->setDefault($suggest);
+                    $q->setValidator(fn($v) => (trim((string)$v) !== '') ? trim((string)$v) : $suggest);
+                    $packages[$pkg] = $this->getHelper('question')->ask($input, $output, $q) ?: $suggest;
+                }
+
+            } else {
+                // ── NORMAL BUMP PATH ──────────────────────────────────────────────────
+                $io->text(sprintf('Fetching <info>composer.json</info> from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
+                $io->newLine();
+
+                foreach ($io->progressIterate($selectedProjects) as $project) {
+                    try {
+                        $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
+                        $composer = json_decode(base64_decode($file['content']), true);
+                        foreach (['require', 'require-dev'] as $section) {
+                            foreach ($composer[$section] ?? [] as $pkg => $ver) {
+                                if ($pkg === 'php' || str_starts_with($pkg, 'ext-')) continue;
+                                if (!isset($allPackages[$pkg])) {
+                                    $allPackages[$pkg] = ['current' => $ver, 'count' => 0];
+                                }
+                                $allPackages[$pkg]['count']++;
+                            }
+                        }
+                    } catch (\Exception $e) {
+                        // no composer.json on this branch — silently skip
+                    }
+                }
+
+                if (empty($allPackages)) {
+                    $io->error('No packages found in the selected projects on branch ' . $baseBranch);
+                    return [null, null, false, false, false, false];
+                }
+
+                ksort($allPackages);
+                $packageList = array_keys($allPackages);
+
+                $io->table(
+                    ['#', 'Package', 'Version (first seen)', '# projects'],
+                    array_map(fn($i, $pkg) => [
+                        $i + 1,
+                        $pkg,
+                        $allPackages[$pkg]['current'],
+                        $allPackages[$pkg]['count'],
+                    ], array_keys($packageList), $packageList)
+                );
+
+                $selectedPackageNames = $this->autocompleteMultiSelect($input, $output, $io, $packageList);
+                if (empty($selectedPackageNames)) {
+                    $io->warning('No packages selected. Aborted.');
+                    return [null, null, false, false, false, false];
+                }
+
+                // ── Step 3: Version per selected package ─────────────────────────────
+                $io->section('③ Versions');
+                foreach ($selectedPackageNames as $pkg) {
+                    $current = $allPackages[$pkg]['current'] ?? 'not present';
+                    $io->write(sprintf('  %s (currently %s): ', $pkg, $current));
+                    $q = new Question('');
+                    $q->setValidator(fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.'));
+                    $version = $this->getHelper('question')->ask($input, $output, $q);
+                    $packages[$pkg] = $version;
+                }
+
+                $mode = $io->choice(
+                    'Update mode',
+                    [
+                        'update-only — skip projects where the package is absent',
+                        'upsert — also add the package if missing',
+                    ],
                     'update-only — skip projects where the package is absent',
-                    'upsert — also add the package if missing',
-                ],
-                'update-only — skip projects where the package is absent',
-            );
-            $addMissing = str_starts_with($mode, 'upsert');
-        } // end if (!$updateLock)
+                );
+                $addMissing = str_starts_with($mode, 'upsert');
+            }
+        } // end if (!$updateLock && !$audit)
 
         // ── Step 4: Options ───────────────────────────────────────────────────
         $io->section('④ Options');
@@ -961,7 +1172,7 @@ class BumpCommand extends Command
         $summaryRows = [
             ['Branch'                  => $baseBranch],
             ['Projects'                => implode(', ', array_column($selectedProjects, 'path'))],
-            ['Mode'                    => $audit ? 'audit (detect and fix CVE vulnerabilities)' : ($updateLock ? 'update-lock (composer update within constraints)' : ($addMissing ? 'upsert (add if missing)' : 'update-only'))],
+            ['Mode'                    => $audit ? 'audit (detect and fix CVE vulnerabilities)' : ($checkOutdated ? 'check-outdated (bump selected outdated packages)' : ($updateLock ? 'update-lock (composer update within constraints)' : ($addMissing ? 'upsert (add if missing)' : 'update-only')))],
             ['--with-all-dependencies' => $withAllDeps ? '✓ yes' : '✗ no'],
         ];
         $io->definitionList(...$summaryRows);
@@ -1131,5 +1342,98 @@ class BumpCommand extends Command
         }
 
         return [$exitCode, $lines];
+    }
+
+    /**
+     * Query Packagist p2 API for the latest stable version of a package.
+     * Returns null for private/unknown packages or on network error.
+     */
+    private function checkPackagistLatest(string $packageName): ?string
+    {
+        $url = 'https://repo.packagist.org/p2/' . $packageName . '.json';
+        $ctx = stream_context_create(['http' => [
+            'timeout'       => 5,
+            'ignore_errors' => true,
+            'header'        => 'User-Agent: bump-all/1.0',
+        ]]);
+        $json = @file_get_contents($url, false, $ctx);
+        if ($json === false) return null;
+
+        $data = json_decode($json, true);
+        if (!isset($data['packages'][$packageName])) return null;
+
+        foreach ($data['packages'][$packageName] as $v) {
+            $ver = $v['version'] ?? '';
+            if (str_starts_with($ver, 'dev-'))   continue;
+            if (str_ends_with($ver, '-dev'))      continue;
+            if (preg_match('/(alpha|beta|rc)\d*/i', $ver)) continue;
+            return ltrim($ver, 'v');
+        }
+        return null;
+    }
+
+    /**
+     * Build a markdown changelog table for the MR description.
+     * Compares installed versions from old/new composer.lock and links to GitHub diffs.
+     */
+    private function buildChangelogSection(array $packageNames, ?string $oldLockJson, ?string $newLockJson): string
+    {
+        if ($oldLockJson === null || $newLockJson === null) return '';
+
+        $oldLock = json_decode($oldLockJson, true);
+        $newLock = json_decode($newLockJson, true);
+
+        $oldVersions = [];
+        $newVersions = [];
+        foreach (array_merge($oldLock['packages'] ?? [], $oldLock['packages-dev'] ?? []) as $pkg) {
+            $oldVersions[$pkg['name']] = ltrim($pkg['version'], 'v');
+        }
+        foreach (array_merge($newLock['packages'] ?? [], $newLock['packages-dev'] ?? []) as $pkg) {
+            $newVersions[$pkg['name']] = ltrim($pkg['version'], 'v');
+        }
+
+        $rows      = [];
+        $hasChange = false;
+        foreach ($packageNames as $pkgName) {
+            $from = $oldVersions[$pkgName] ?? null;
+            $to   = $newVersions[$pkgName] ?? null;
+            if ($from === $to) continue;
+            $hasChange = true;
+            $fromStr   = $from ?? 'new';
+            $toStr     = $to   ?? 'removed';
+            $diffLink  = $this->getPackagistChangelogUrl($pkgName, $from, $to);
+            $toCell    = $diffLink ? "[`$toStr`]($diffLink)" : "`$toStr`";
+            $rows[]    = "| `$pkgName` | `$fromStr` | $toCell |";
+        }
+
+        if (!$hasChange) return '';
+
+        return implode("\n", array_merge(
+            ["### 📦 Package changes", "", "| Package | From | To (diff) |", "|---------|------|-----------|"],
+            $rows
+        ));
+    }
+
+    /**
+     * Return a GitHub compare URL for a package by looking up its source on Packagist.
+     * Returns null for private packages or when no GitHub source is available.
+     */
+    private function getPackagistChangelogUrl(string $packageName, ?string $fromVersion, ?string $toVersion): ?string
+    {
+        if ($fromVersion === null || $toVersion === null || $fromVersion === $toVersion) return null;
+
+        $url  = 'https://packagist.org/packages/' . $packageName . '.json';
+        $ctx  = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true, 'header' => 'User-Agent: bump-all/1.0']]);
+        $json = @file_get_contents($url, false, $ctx);
+        if ($json === false) return null;
+
+        $data = json_decode($json, true);
+        $repo = $data['package']['repository'] ?? null;
+        if (!$repo) return null;
+
+        if (preg_match('#github\.com[:/]([^/]+/[^/.]+?)(?:\.git)?$#', $repo, $m)) {
+            return "https://github.com/{$m[1]}/compare/v$fromVersion...v$toVersion";
+        }
+        return null;
     }
 }

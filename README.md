@@ -83,6 +83,7 @@ Four modes are available:
 | Mode | Command | What it does |
 |------|---------|-------------|
 | **Interactive wizard** | `-i` | Step-by-step: pick projects, mode, packages, versions |
+| **Check outdated** | `--check-outdated` | Scan Packagist, show what's outdated, pick what to bump |
 | **Bump packages** | `"vendor/pkg:version" ...` | Update specific packages to a target version |
 | **Update lock** | `--update-lock` | Refresh `composer.lock` to latest patch/minor within existing constraints |
 | **Security audit** | `--audit` | Detect CVE vulnerabilities and update only affected packages |
@@ -90,6 +91,27 @@ Four modes are available:
 ---
 
 ## Common scenarios
+
+#### Discover what's outdated and pick what to update
+
+```bash
+docker run --rm -it --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --check-outdated \
+  --base-branch="release/2026.7.4"
+```
+
+Shows a table like:
+
+```
+ # | Package              | Constraint | Installed | Latest | # Projects
+---|----------------------|------------|-----------|--------|------------
+ 1 | doctrine/orm         | ^3.3       | 3.3.1     | 3.3.4  | 12
+ 2 | symfony/http-client  | 6.4.*      | 6.4.12    | 7.2.5  | 20
+ 3 | phpunit/phpunit       | ^12.5      | 12.5.0    | 12.5.3 | 8
+```
+
+Then autocomplete-select which to bump. Versions are pre-filled with `X.Y.*` format.
+The MR description automatically includes a diff link to GitHub for each package.
 
 #### Update 2 packages on 3 specific projects
 
@@ -152,9 +174,10 @@ bump-all — Interactive Wizard
   ① Select projects   ② Select packages   ③ Set versions   ④ Configure options
 
  What do you want to do?
-  [bump]        Bump specific packages to a target version
-  [update-lock] Update composer.lock to latest (within existing constraints)
-  [audit]       Audit and fix CVE security vulnerabilities
+  [bump]           Bump specific packages to a target version
+  [update-lock]    Update composer.lock to latest (within existing constraints)
+  [audit]          Audit and fix CVE security vulnerabilities
+  [check-outdated] Check Packagist for outdated packages and select which to update
  > bump
 ```
 
@@ -400,6 +423,7 @@ See the [Symfony upgrade guide](https://symfony.com/doc/current/setup/upgrade_ma
 | Option                    | Env var                | Default        | Description                                                                       |
 |---------------------------|------------------------|----------------|-----------------------------------------------------------------------------------|
 | `--interactive`, `-i`     | —                      | —              | Launch the interactive wizard                                                     |
+| `--check-outdated`        | —                      | —              | Scan Packagist for outdated packages, select which to bump interactively          |
 | `--update-lock`           | —                      | —              | Refresh `composer.lock` within existing constraints (no `composer.json` changes)  |
 | `--audit`                 | —                      | —              | Detect CVE vulnerabilities and update only affected packages                      |
 | `--token`, `-t`           | `GITLAB_TOKEN`         | —              | GitLab personal access token                                                      |
