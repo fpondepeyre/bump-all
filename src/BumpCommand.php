@@ -1,5 +1,6 @@
 <?php
 
+use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputArgument;
@@ -8,6 +9,10 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Gitlab\Client;
 
+#[AsCommand(
+    name: 'composer:update',
+    description: 'Update Composer dependencies across all projects in a GitLab group and open a MR for each',
+)]
 class BumpCommand extends Command
 {
     /**
@@ -24,10 +29,8 @@ class BumpCommand extends Command
         'symfony/ux-twig-component', // independent versioning
     ];
 
-    protected function configure()
+    protected function configure(): void
     {
-        $this->setName('composer:update');
-        $this->setDescription('Update Composer dependencies across all projects in a GitLab group and open a MR for each');
         $this->addArgument('packages', InputArgument::IS_ARRAY | InputArgument::OPTIONAL, 'Packages to update, format: vendor/name:version (e.g. symfony/http-client:7.4.* symfony/console:7.4.*)');
         $this->addOption('token', 't', InputOption::VALUE_OPTIONAL, 'GitLab private token (or GITLAB_TOKEN env var)');
         $this->addOption('group', 'g', InputOption::VALUE_OPTIONAL, 'GitLab group path or ID (or GITLAB_GROUP env var)');
@@ -440,14 +443,19 @@ class BumpCommand extends Command
     {
         $io = new SymfonyStyle($input, $output);
 
-        $io->title('bump-all — Interactive Mode');
+        $io->title('bump-all — Interactive Wizard');
+        $io->info([
+            'This wizard will guide you through 4 steps:',
+            '  ① Select projects   ② Select packages',
+            '  ③ Set versions      ④ Configure options',
+        ]);
 
-        // ── Step 1: Fetch all projects ────────────────────────────────────────
-        $io->section('Step 1/4 — Select projects');
+        // ── Step 1: Fetch & select projects ──────────────────────────────────
+        $io->section('① Projects');
 
         $allProjects = [];
         $page = 1;
-        $io->write('Fetching projects from GitLab...');
+        $io->text('Fetching projects from GitLab...');
         do {
             try {
                 $batch = $client->groups()->projects($group, [
@@ -460,52 +468,50 @@ class BumpCommand extends Command
             $allProjects = array_merge($allProjects, $batch);
             $page++;
         } while (count($batch) === 100);
-        $io->writeln(sprintf(' <info>%d found.</info>', count($allProjects)));
 
         if (empty($allProjects)) {
             $io->error('No projects found in group.');
             return [null, null, false, false];
         }
 
-        // ── Step 2: Select projects ───────────────────────────────────────────
-        $io->newLine();
+        $io->success(sprintf('%d project(s) found in group.', count($allProjects)));
+
+        // Show projects table for reference (with default branch)
         $io->table(
-            ['#', 'Project'],
-            array_map(fn($i, $p) => [$i + 1, $p['path_with_namespace']], array_keys($allProjects), $allProjects)
+            ['#', 'Project', 'Default branch'],
+            array_map(fn($i, $p) => [
+                $i + 1,
+                $p['path_with_namespace'],
+                $p['default_branch'] ?? '?',
+            ], array_keys($allProjects), $allProjects)
         );
 
-        $selection = $io->ask(
-            'Select projects (e.g. <comment>1,3,5</comment> or <comment>all</comment>)',
-            null,
-            function ($v) use ($allProjects) {
-                if (strtolower(trim($v)) === 'all') return $v;
-                foreach (array_map('intval', explode(',', $v)) as $idx) {
-                    if ($idx < 1 || $idx > count($allProjects)) {
-                        throw new \RuntimeException("Invalid index: $idx");
-                    }
-                }
-                return $v;
-            }
+        // Native multiselect: user picks by number(s) or "all"
+        $projectPaths = array_column($allProjects, 'path');
+        $projectChoices = array_merge($projectPaths, ['all — select every project']);
+
+        $selectedPaths = $io->choice(
+            sprintf('Select projects (%d found) — separate multiple choices with commas', count($allProjects)),
+            $projectChoices,
+            multiSelect: true,
         );
 
-        $selectedProjects = strtolower(trim($selection)) === 'all'
-            ? $allProjects
-            : array_map(fn($idx) => $allProjects[(int)$idx - 1], explode(',', $selection));
+        if (in_array('all — select every project', $selectedPaths, true)) {
+            $selectedProjects = $allProjects;
+        } else {
+            $selectedProjects = array_values(array_filter($allProjects, fn($p) => in_array($p['path'], $selectedPaths, true)));
+        }
 
-        $io->success(sprintf('%d project(s) selected.', count($selectedProjects)));
+        $io->success(sprintf('%d project(s) selected: %s', count($selectedProjects), implode(', ', array_column($selectedProjects, 'path'))));
 
-        // ── Step 3: Fetch packages with current versions ──────────────────────
-        $io->section('Step 2/4 — Select packages');
+        // ── Step 2: Fetch packages with current versions ──────────────────────
+        $io->section('② Packages');
+        $io->text(sprintf('Fetching <info>composer.json</info> from <info>%d</info> project(s) on branch <comment>%s</comment>...', count($selectedProjects), $baseBranch));
+        $io->newLine();
 
-        // packageName => ['current' => 'x.y.*', count => N projects that have it]
+        // progressIterate() handles the progress bar automatically
         $allPackages = [];
-        $progressBar = $io->createProgressBar(count($selectedProjects));
-        $progressBar->setFormat(' %current%/%max% [%bar%] %message%');
-        $progressBar->start();
-
-        foreach ($selectedProjects as $project) {
-            $progressBar->setMessage($project['path']);
-            $progressBar->advance();
+        foreach ($io->progressIterate($selectedProjects) as $project) {
             try {
                 $file     = $client->repositoryFiles()->getFile($project['id'], 'composer.json', $baseBranch);
                 $composer = json_decode(base64_decode($file['content']), true);
@@ -519,11 +525,9 @@ class BumpCommand extends Command
                     }
                 }
             } catch (\Exception $e) {
-                // no composer.json on this branch
+                // no composer.json on this branch — silently skip
             }
         }
-        $progressBar->finish();
-        $io->newLine(2);
 
         if (empty($allPackages)) {
             $io->error('No packages found in the selected projects on branch ' . $baseBranch);
@@ -533,76 +537,75 @@ class BumpCommand extends Command
         ksort($allPackages);
         $packageList = array_keys($allPackages);
 
+        // Show package table with extra context (current version + how many projects use it)
         $io->table(
-            ['#', 'Package', 'Current version', 'Projects'],
-            array_map(function ($i, $pkg) use ($allPackages) {
-                return [
-                    $i + 1,
-                    $pkg,
-                    $allPackages[$pkg]['current'],
-                    $allPackages[$pkg]['count'],
-                ];
-            }, array_keys($packageList), $packageList)
+            ['#', 'Package', 'Version (first seen)', '# projects'],
+            array_map(fn($i, $pkg) => [
+                $i + 1,
+                $pkg,
+                $allPackages[$pkg]['current'],
+                $allPackages[$pkg]['count'],
+            ], array_keys($packageList), $packageList)
         );
 
-        $pkgSelection = $io->ask(
-            'Select packages to bump (e.g. <comment>1,3,5</comment>)',
-            null,
-            function ($v) use ($packageList) {
-                foreach (array_map('intval', explode(',', $v)) as $idx) {
-                    if ($idx < 1 || $idx > count($packageList)) {
-                        throw new \RuntimeException("Invalid index: $idx");
-                    }
-                }
-                return $v;
-            }
+        // Native multiselect for packages too
+        $selectedPackageNames = $io->choice(
+            sprintf('Select packages to bump (%d found) — separate multiple choices with commas', count($packageList)),
+            $packageList,
+            multiSelect: true,
         );
-        $selectedPkgIndices = array_map('intval', explode(',', $pkgSelection));
 
-        // ── Step 4: Version per selected package ──────────────────────────────
-        $io->section('Step 3/4 — Set target versions');
+        // ── Step 3: Version per selected package ──────────────────────────────
+        $io->section('③ Versions');
+
         $packages = [];
-        foreach ($selectedPkgIndices as $idx) {
-            $pkg     = $packageList[$idx - 1];
+        foreach ($selectedPackageNames as $pkg) {
             $current = $allPackages[$pkg]['current'];
             $version = $io->ask(
-                sprintf('<info>%s</info> (currently <comment>%s</comment>)', $pkg, $current),
+                sprintf('<info>%s</info>  (currently <comment>%s</comment>)', $pkg, $current),
                 null,
                 fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.')
             );
             $packages[$pkg] = $version;
         }
 
-        // ── Step 5: Options ───────────────────────────────────────────────────
-        $io->section('Step 4/4 — Options');
+        // ── Step 4: Options ───────────────────────────────────────────────────
+        $io->section('④ Options');
 
         $mode = $io->choice(
             'Update mode',
-            ['update-only — skip projects where the package is absent', 'upsert — also add the package if missing'],
-            'update-only — skip projects where the package is absent'
+            [
+                'update-only — skip projects where the package is absent',
+                'upsert — also add the package if missing',
+            ],
+            'update-only — skip projects where the package is absent',
         );
-        $addMissing = str_starts_with($mode, 'upsert');
-
+        $addMissing  = str_starts_with($mode, 'upsert');
         $withAllDeps = $io->confirm('Use --with-all-dependencies? (recommended for major migrations)', false);
 
         // ── Summary + confirm ─────────────────────────────────────────────────
-        $io->section('Summary');
+        $io->section('✅  Summary');
 
-        $io->table(['Setting', 'Value'], [
-            ['Projects', implode(', ', array_column($selectedProjects, 'path'))],
-            ['Branch',   $baseBranch],
-            ['Mode',     $addMissing ? 'upsert' : 'update-only'],
-            ['--with-all-dependencies', $withAllDeps ? 'yes' : 'no'],
-        ]);
+        // definitionList() — compact key/value block (7.x feature)
+        $io->definitionList(
+            ['Branch'                  => $baseBranch],
+            ['Projects'                => implode(', ', array_column($selectedProjects, 'path'))],
+            ['Mode'                    => $addMissing ? 'upsert (add if missing)' : 'update-only'],
+            ['--with-all-dependencies' => $withAllDeps ? '✓ yes' : '✗ no'],
+        );
 
-        $io->table(['Package', 'New version'], array_map(
-            fn($pkg, $ver) => [$pkg, $ver],
-            array_keys($packages),
-            $packages
-        ));
+        $io->table(
+            ['Package', 'Current', '→', 'Target'],
+            array_map(fn($pkg, $ver) => [
+                $pkg,
+                $allPackages[$pkg]['current'],
+                '→',
+                "<info>$ver</info>",
+            ], array_keys($packages), $packages)
+        );
 
-        if (!$io->confirm('Proceed and create MRs?', false)) {
-            $io->warning('Aborted.');
+        if (!$io->confirm('🚀  Proceed and create MRs?', false)) {
+            $io->warning('Aborted by user.');
             return [null, null, false, false];
         }
 

@@ -1,4 +1,5 @@
+/vendor/
+/composer.phar
 /app/cache/*
 !/app/cache/.gitkeep
-/vendor/
 .env
