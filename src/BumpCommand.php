@@ -588,7 +588,7 @@ class BumpCommand extends Command
 
         $packages = [];
         foreach ($selectedPackageNames as $pkg) {
-            $current = $allPackages[$pkg]['current'];
+            $current = $allPackages[$pkg]['current'] ?? 'not present';
             // Plain-text prompt — ANSI markup in readline prompts corrupts input
             $io->write(sprintf('  %s (currently %s): ', $pkg, $current));
             $q = new Question('');
@@ -658,6 +658,7 @@ class BumpCommand extends Command
 
         $io->text([
             'Type a package name and press <comment>Tab</comment> to autocomplete.',
+            'You can also type any <comment>vendor/package</comment> name not yet in your projects.',
             'Press <comment>Enter</comment> with an empty line to finish.',
         ]);
         $io->newLine();
@@ -671,11 +672,11 @@ class BumpCommand extends Command
 
             $q = new Question($prompt);
             $q->setAutocompleterValues($remaining);
-            $q->setValidator(function (?string $v) use ($choices, $selected) {
+            $q->setValidator(function (?string $v) use ($selected) {
                 $v = trim($v ?? '');
                 if ($v === '') return null; // done
-                if (!in_array($v, $choices, true)) {
-                    throw new \RuntimeException("Unknown package: $v");
+                if (!preg_match('#^[a-z0-9_.-]+/[a-z0-9_.-]+$#i', $v)) {
+                    throw new \RuntimeException("Invalid package name: $v (expected vendor/package)");
                 }
                 if (in_array($v, $selected, true)) {
                     throw new \RuntimeException("Already selected: $v");
