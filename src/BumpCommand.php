@@ -103,11 +103,16 @@ class BumpCommand extends Command
             return Command::FAILURE;
         }
 
-        $httpClient = new \GuzzleHttp\Client([
-            'verify' => !$noSslVerify,
-        ]);
-        $builder = new \Gitlab\HttpClient\Builder(new \Http\Adapter\Guzzle7\Client($httpClient));
-        $client  = new Client($builder);
+        if ($noSslVerify) {
+            $httpClient = new \GuzzleHttp\Client([
+                'verify' => false,
+                'curl'   => [CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => 0],
+            ]);
+            $builder = new \Gitlab\HttpClient\Builder(new \Http\Adapter\Guzzle7\Client($httpClient));
+            $client  = new Client($builder);
+        } else {
+            $client = new Client();
+        }
         $client->setUrl($gitlabUrl);
         $client->authenticate($token, Client::AUTH_HTTP_TOKEN);
 
