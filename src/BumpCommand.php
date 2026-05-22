@@ -82,8 +82,8 @@ class BumpCommand extends Command
                 $packages[$name] = $version;
             }
 
-            if (empty($packages)) {
-                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y</error>');
+            if (empty($packages) && !$interactive) {
+                $output->writeln('<error>No packages specified. Pass vendor/name:version arguments or use --symfony=X.Y or -i for interactive mode.</error>');
                 return Command::FAILURE;
             }
         }
