@@ -235,10 +235,9 @@ class BumpCommand extends Command
                     }
 
                     $composerFlags = '--no-interaction --no-scripts' . ($withAllDeps ? ' --with-all-dependencies' : '');
-                    $composerOut   = [];
-                    exec(
+                    [$composerRet, $composerOut] = $this->runCommandLive(
                         'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' 2>&1',
-                        $composerOut, $composerRet
+                        $output
                     );
 
                     if ($composerRet !== 0) {
@@ -250,10 +249,9 @@ class BumpCommand extends Command
                         }
                         if (!empty($missingExts)) {
                             $ignoreFlags = implode(' ', array_map(fn($ext) => '--ignore-platform-req=' . escapeshellarg($ext), array_keys($missingExts)));
-                            $composerOut = [];
-                            exec(
+                            [$composerRet, $composerOut] = $this->runCommandLive(
                                 'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' ' . $ignoreFlags . ' 2>&1',
-                                $composerOut, $composerRet
+                                $output
                             );
                         }
                     }
@@ -451,11 +449,9 @@ class BumpCommand extends Command
 
                 $composerFlags = '--no-interaction --no-scripts' . ($withAllDeps ? ' --with-all-dependencies' : '');
 
-                $composerOut = [];
-                exec(
+                [$composerRet, $composerOut] = $this->runCommandLive(
                     'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' 2>&1',
-                    $composerOut,
-                    $composerRet
+                    $output
                 );
 
                 // On failure, retry ignoring only missing extensions (preserves PHP version constraint)
@@ -473,11 +469,9 @@ class BumpCommand extends Command
                             array_keys($missingExts)
                         ));
                         $output->writeln('  Ignoring missing extensions: ' . implode(', ', array_keys($missingExts)));
-                        $composerOut = [];
-                        exec(
+                        [$composerRet, $composerOut] = $this->runCommandLive(
                             'cd ' . escapeshellarg($tmpDir) . ' && COMPOSER_AUTH=' . escapeshellarg(file_get_contents($authFile)) . ' composer update ' . $composerFlags . ' ' . $ignoreFlags . ' 2>&1',
-                            $composerOut,
-                            $composerRet
+                            $output
                         );
                     }
                 }
@@ -844,5 +838,67 @@ class BumpCommand extends Command
         }
 
         return $selected;
+    }
+
+    /**
+     * Run a shell command and stream its output line-by-line.
+     * Returns [exitCode, outputLines[]] — identical interface to exec() but with live display.
+     */
+    private function runCommandLive(string $cmd, OutputInterface $output, string $prefix = '    '): array
+    {
+        $process = proc_open($cmd, [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']], $pipes);
+        if (!is_resource($process)) {
+            return [1, ['Failed to start process']];
+        }
+
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $lines  = [];
+        $buffer = '';
+
+        while (true) {
+            $readStdout = $pipes[1];
+            $readStderr = $pipes[2];
+            $read       = [$readStdout, $readStderr];
+            $write      = null;
+            $except     = null;
+
+            if (stream_select($read, $write, $except, 0, 100000) === false) {
+                break;
+            }
+
+            foreach ($read as $stream) {
+                $chunk = fread($stream, 4096);
+                if ($chunk === false || $chunk === '') continue;
+                $buffer .= $chunk;
+                while (($pos = strpos($buffer, "\n")) !== false) {
+                    $line   = substr($buffer, 0, $pos);
+                    $buffer = substr($buffer, $pos + 1);
+                    $clean  = rtrim($line);
+                    if ($clean !== '') {
+                        $lines[] = $clean;
+                        $output->writeln($prefix . $clean);
+                    }
+                }
+            }
+
+            if (feof($pipes[1]) && feof($pipes[2])) {
+                break;
+            }
+        }
+
+        // Flush any remaining buffer
+        if ($buffer !== '') {
+            $lines[]   = rtrim($buffer);
+            $output->writeln($prefix . rtrim($buffer));
+        }
+
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($process);
+
+        return [$exitCode, $lines];
     }
 }
