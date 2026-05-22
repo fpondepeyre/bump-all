@@ -6,11 +6,9 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Question\Question;
 use Symfony\Component\Console\Style\SymfonyStyle;
 use Gitlab\Client;
-use PhpSchool\CliMenu\Builder\CliMenuBuilder;
-use PhpSchool\CliMenu\CliMenu;
-use PhpSchool\CliMenu\MenuItem\CheckboxItem;
 
 #[AsCommand(
     name: 'composer:update',
@@ -505,22 +503,25 @@ class BumpCommand extends Command
             ], array_keys($allProjects), $allProjects)
         );
 
-        // Checkbox selection for projects
-        $selectedPaths = $this->checkboxSelect(
-            'Select projects (↑↓ navigate, Space toggle, Enter confirm)',
-            array_column($allProjects, 'path'),
-            selectAll: true,
+        // Project selection: type numbers or "all"
+        $selection = $io->ask(
+            'Select projects by number (e.g. <comment>1,3,5</comment> or <comment>all</comment>)',
+            null,
+            function ($v) use ($allProjects) {
+                if (strtolower(trim($v)) === 'all') return $v;
+                foreach (array_map('intval', explode(',', $v)) as $idx) {
+                    if ($idx < 1 || $idx > count($allProjects)) {
+                        throw new \RuntimeException("Invalid index: $idx");
+                    }
+                }
+                return $v;
+            }
         );
 
-        if (empty($selectedPaths)) {
-            $io->warning('No projects selected. Aborted.');
-            return [null, null, false, false];
-        }
-
-        if (in_array('★ Select all projects', $selectedPaths, true)) {
+        if (strtolower(trim($selection)) === 'all') {
             $selectedProjects = $allProjects;
         } else {
-            $selectedProjects = array_values(array_filter($allProjects, fn($p) => in_array($p['path'], $selectedPaths, true)));
+            $selectedProjects = array_map(fn($idx) => $allProjects[(int)$idx - 1], explode(',', $selection));
         }
 
         $io->success(sprintf('%d project(s) selected: %s', count($selectedProjects), implode(', ', array_column($selectedProjects, 'path'))));
@@ -569,9 +570,11 @@ class BumpCommand extends Command
             ], array_keys($packageList), $packageList)
         );
 
-        // Checkbox selection for packages
-        $selectedPackageNames = $this->checkboxSelect(
-            'Select packages to bump (↑↓ navigate, Space toggle, Enter confirm)',
+        // Package selection: autocomplete with Tab, one at a time, empty = done
+        $selectedPackageNames = $this->autocompleteMultiSelect(
+            $input,
+            $output,
+            $io,
             $packageList,
         );
 
@@ -638,52 +641,55 @@ class BumpCommand extends Command
     }
 
     /**
-     * Display an interactive checkbox menu and return the selected items.
-     * ↑↓ to navigate, Space to toggle, Enter on "Confirm" to validate.
+     * Multi-select with Tab autocomplete.
+     * User types one item at a time (Tab to complete), empty input finishes.
      *
-     * @param string   $title     Menu title shown at the top
-     * @param string[] $choices   List of items to display
-     * @param bool     $selectAll Add a "Select all" shortcut at the top
-     * @return string[]           Selected item labels
+     * @param string[] $choices
+     * @return string[]
      */
-    private function checkboxSelect(string $title, array $choices, bool $selectAll = false): array
-    {
+    private function autocompleteMultiSelect(
+        InputInterface $input,
+        OutputInterface $output,
+        SymfonyStyle $io,
+        array $choices,
+    ): array {
+        $helper   = $this->getHelper('question');
         $selected = [];
 
-        $builder = (new CliMenuBuilder())
-            ->setTitle($title)
-            ->setWidth(min(100, max(60, max(array_map('strlen', $choices)) + 10)))
-            ->setPadding(1, 2)
-            ->setForegroundColour('white')
-            ->setBackgroundColour('blue');
+        $io->text([
+            'Type a package name and press <comment>Tab</comment> to autocomplete.',
+            'Press <comment>Enter</comment> with an empty line to finish.',
+        ]);
+        $io->newLine();
 
-        if ($selectAll) {
-            $builder->addItem('★ Select all projects', function (CliMenu $menu) use ($choices, &$selected) {
-                foreach ($menu->getItems() as $item) {
-                    if ($item instanceof CheckboxItem) {
-                        $item->setChecked(true);
-                    }
+        while (true) {
+            $remaining = array_values(array_diff($choices, $selected));
+
+            $prompt = count($selected) === 0
+                ? 'Package: '
+                : sprintf('Package <comment>(%d selected, empty to finish)</comment>: ', count($selected));
+
+            $q = new Question($prompt);
+            $q->setAutocompleterValues($remaining);
+            $q->setValidator(function (?string $v) use ($choices, $selected) {
+                $v = trim($v ?? '');
+                if ($v === '') return null; // done
+                if (!in_array($v, $choices, true)) {
+                    throw new \RuntimeException("Unknown package: $v");
                 }
-                $menu->redraw();
+                if (in_array($v, $selected, true)) {
+                    throw new \RuntimeException("Already selected: $v");
+                }
+                return $v;
             });
-            $builder->addLineBreak('─');
+
+            $pkg = $helper->ask($input, $output, $q);
+
+            if ($pkg === null) break;
+
+            $selected[] = $pkg;
+            $io->text(sprintf('  <info>✓</info> %s', $pkg));
         }
-
-        foreach ($choices as $choice) {
-            $builder->addCheckboxItem($choice, function () {});
-        }
-
-        $builder->addLineBreak('─');
-        $builder->addItem('✅  Confirm selection', function (CliMenu $menu) use (&$selected) {
-            foreach ($menu->getItems() as $item) {
-                if ($item instanceof CheckboxItem && $item->getChecked()) {
-                    $selected[] = $item->getText();
-                }
-            }
-            $menu->close();
-        });
-
-        $builder->build()->open();
 
         return $selected;
     }
