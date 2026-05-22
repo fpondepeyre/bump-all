@@ -244,8 +244,7 @@ class BumpCommand extends Command
                 $parts   = explode('.', $latest);
                 $suggest = count($parts) >= 2 ? $parts[0] . '.' . $parts[1] . '.*' : $latest;
                 $io->write(sprintf('  %s (latest: %s, Enter for %s): ', $pkg, $latest, $suggest));
-                $q = new Question('');
-                $q->setDefault($suggest);
+                $q = new Question('', $suggest);
                 $q->setValidator(fn($v) => (trim((string)$v) !== '') ? trim((string)$v) : $suggest);
                 $packages[$pkg] = $this->getHelper('question')->ask($input, $output, $q) ?: $suggest;
             }
@@ -1085,8 +1084,7 @@ class BumpCommand extends Command
                     $parts   = explode('.', $latest);
                     $suggest = count($parts) >= 2 ? $parts[0] . '.' . $parts[1] . '.*' : $latest;
                     $io->write(sprintf('  %s (latest: %s, Enter for %s): ', $pkg, $latest, $suggest));
-                    $q = new Question('');
-                    $q->setDefault($suggest);
+                    $q = new Question('', $suggest);
                     $q->setValidator(fn($v) => (trim((string)$v) !== '') ? trim((string)$v) : $suggest);
                     $packages[$pkg] = $this->getHelper('question')->ask($input, $output, $q) ?: $suggest;
                 }
