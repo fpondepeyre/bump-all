@@ -303,7 +303,7 @@ class BumpCommand extends Command
                     json_encode($composer, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n"
                 );
 
-                // Pin PHP platform version if specified (avoids installing packages incompatible with CI PHP)
+                // Pin PHP platform version if specified — only for local resolution, NOT committed
                 if ($phpVersion) {
                     exec('cd ' . escapeshellarg($tmpDir) . ' && composer config platform.php ' . escapeshellarg($phpVersion) . ' 2>&1');
                 }
@@ -339,6 +339,11 @@ class BumpCommand extends Command
                             $composerRet
                         );
                     }
+                }
+
+                // Remove platform.php from composer.json — it was only needed for local resolution
+                if ($phpVersion) {
+                    exec('cd ' . escapeshellarg($tmpDir) . ' && composer config --unset platform 2>&1');
                 }
 
                 if ($composerRet !== 0) {
@@ -612,9 +617,6 @@ class BumpCommand extends Command
             ['Mode'                    => $addMissing ? 'upsert (add if missing)' : 'update-only'],
             ['--with-all-dependencies' => $withAllDeps ? '✓ yes' : '✗ no'],
         ];
-        if ($phpVersion) {
-            $summaryRows[] = ['platform.php (composer)' => $phpVersion];
-        }
         $io->definitionList(...$summaryRows);
 
         $io->table(
