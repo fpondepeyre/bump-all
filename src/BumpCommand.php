@@ -841,10 +841,11 @@ class BumpCommand extends Command
     }
 
     /**
-     * Run a shell command and stream its output line-by-line.
-     * Returns [exitCode, outputLines[]] — identical interface to exec() but with live display.
+     * Run a shell command and show a single-line spinner that updates in place.
+     * If output is not a TTY (no ANSI), streams lines normally instead.
+     * Returns [exitCode, outputLines[]].
      */
-    private function runCommandLive(string $cmd, OutputInterface $output, string $prefix = '    '): array
+    private function runCommandLive(string $cmd, OutputInterface $output, string $prefix = '  '): array
     {
         $process = proc_open($cmd, [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']], $pipes);
         if (!is_resource($process)) {
@@ -855,19 +856,34 @@ class BumpCommand extends Command
         stream_set_blocking($pipes[1], false);
         stream_set_blocking($pipes[2], false);
 
-        $lines  = [];
-        $buffer = '';
+        $spinner    = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        $tick       = 0;
+        $lines      = [];
+        $buffer     = '';
+        $lastStatus = 'running...';
+        $lastLen    = 0;
+        $useSpin    = $output->isDecorated(); // only on real TTY
+
+        $redraw = function (string $status) use ($output, $spinner, &$tick, &$lastLen, $prefix, $useSpin) {
+            if (!$useSpin) return;
+            $icon = $spinner[$tick++ % count($spinner)];
+            // Strip ANSI codes for length calculation, cap at 60 chars
+            $clean = preg_replace('/\e\[[0-9;]*m/', '', $status);
+            $line  = $prefix . $icon . ' ' . substr($clean, 0, 72);
+            // Pad to erase previous longer line
+            $line  = str_pad($line, max($lastLen, strlen($line)));
+            $lastLen = strlen($line);
+            $output->write("\r" . $line);
+        };
+
+        $redraw($lastStatus);
 
         while (true) {
-            $readStdout = $pipes[1];
-            $readStderr = $pipes[2];
-            $read       = [$readStdout, $readStderr];
-            $write      = null;
-            $except     = null;
+            $read   = [$pipes[1], $pipes[2]];
+            $write  = null;
+            $except = null;
 
-            if (stream_select($read, $write, $except, 0, 100000) === false) {
-                break;
-            }
+            if (stream_select($read, $write, $except, 0, 80000) === false) break;
 
             foreach ($read as $stream) {
                 $chunk = fread($stream, 4096);
@@ -876,28 +892,37 @@ class BumpCommand extends Command
                 while (($pos = strpos($buffer, "\n")) !== false) {
                     $line   = substr($buffer, 0, $pos);
                     $buffer = substr($buffer, $pos + 1);
-                    $clean  = rtrim($line);
-                    if ($clean !== '') {
-                        $lines[] = $clean;
-                        $output->writeln($prefix . $clean);
+                    $clean  = trim($line);
+                    if ($clean === '') continue;
+                    $lines[] = $clean;
+                    if ($useSpin) {
+                        $lastStatus = $clean;
+                        $redraw($lastStatus);
+                    } else {
+                        $output->writeln($prefix . '  ' . $clean);
                     }
                 }
             }
 
-            if (feof($pipes[1]) && feof($pipes[2])) {
-                break;
-            }
+            if (feof($pipes[1]) && feof($pipes[2])) break;
         }
 
-        // Flush any remaining buffer
         if ($buffer !== '') {
-            $lines[]   = rtrim($buffer);
-            $output->writeln($prefix . rtrim($buffer));
+            $clean = trim($buffer);
+            if ($clean !== '') {
+                $lines[] = $clean;
+                if ($useSpin) { $redraw($clean); } else { $output->writeln($prefix . '  ' . $clean); }
+            }
         }
 
         fclose($pipes[1]);
         fclose($pipes[2]);
         $exitCode = proc_close($process);
+
+        // Clear the spinner line
+        if ($useSpin) {
+            $output->write("\r" . str_repeat(' ', $lastLen) . "\r");
+        }
 
         return [$exitCode, $lines];
     }
