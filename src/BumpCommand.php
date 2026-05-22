@@ -589,11 +589,11 @@ class BumpCommand extends Command
         $packages = [];
         foreach ($selectedPackageNames as $pkg) {
             $current = $allPackages[$pkg]['current'];
-            $version = $io->ask(
-                sprintf('<info>%s</info>  (currently <comment>%s</comment>)', $pkg, $current),
-                null,
-                fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.')
-            );
+            // Plain-text prompt — ANSI markup in readline prompts corrupts input
+            $io->write(sprintf('  %s (currently %s): ', $pkg, $current));
+            $q = new Question('');
+            $q->setValidator(fn($v) => (trim($v) !== '') ? trim($v) : throw new \RuntimeException('Version cannot be empty.'));
+            $version = $this->getHelper('question')->ask($input, $output, $q);
             $packages[$pkg] = $version;
         }
 
@@ -667,7 +667,7 @@ class BumpCommand extends Command
 
             $prompt = count($selected) === 0
                 ? 'Package: '
-                : sprintf('Package <comment>(%d selected, empty to finish)</comment>: ', count($selected));
+                : sprintf('Package (%d selected, empty to finish): ', count($selected));
 
             $q = new Question($prompt);
             $q->setAutocompleterValues($remaining);
@@ -688,7 +688,7 @@ class BumpCommand extends Command
             if ($pkg === null) break;
 
             $selected[] = $pkg;
-            $io->text(sprintf('  <info>✓</info> %s', $pkg));
+            $output->writeln(sprintf('  [OK] %s', $pkg));
         }
 
         return $selected;
