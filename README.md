@@ -78,7 +78,7 @@ Without `-t`, there is no spinner — a single `running composer update... done.
 
 ## Usage
 
-Three modes are available:
+Four modes are available:
 
 | Mode | Command | What it does |
 |------|---------|-------------|
@@ -86,6 +86,52 @@ Three modes are available:
 | **Bump packages** | `"vendor/pkg:version" ...` | Update specific packages to a target version |
 | **Update lock** | `--update-lock` | Refresh `composer.lock` to latest patch/minor within existing constraints |
 | **Security audit** | `--audit` | Detect CVE vulnerabilities and update only affected packages |
+
+---
+
+## Common scenarios
+
+#### Update 2 packages on 3 specific projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  "symfony/http-client:7.4.*" "symfony/messenger:7.4.*" \
+  --project="service-search,service-payment,service-order" \
+  --base-branch="release/2026.7.4"
+```
+
+#### Update all Symfony packages on one project (migration 6.4 → 7.4)
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --project="service-search" \
+  --base-branch="release/2026.7.4"
+```
+
+#### Update all Symfony packages on ALL projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --symfony=7.4 \
+  --base-branch="release/2026.7.4"
+```
+
+#### Refresh lock file on all projects (patch/minor updates)
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --update-lock \
+  --base-branch="release/2026.7.4"
+```
+
+#### Fix CVE vulnerabilities across all projects
+
+```bash
+docker run --rm -t --network=host -v $(pwd)/.env:/app/.env bump-all \
+  --audit \
+  --base-branch="release/2026.7.4"
+```
 
 ---
 
@@ -360,7 +406,7 @@ See the [Symfony upgrade guide](https://symfony.com/doc/current/setup/upgrade_ma
 | `--group`, `-g`           | `GITLAB_GROUP`         | —              | GitLab group path or numeric ID                                                   |
 | `--gitlab-url`            | `GITLAB_URL`           | —              | GitLab instance URL                                                               |
 | `--base-branch`           | `GITLAB_BASE_BRANCH`   | `master`       | Branch to update and target for MRs                                               |
-| `--project`               | —                      | —              | Restrict to a single project by name or path                                      |
+| `--project`               | —                      | —              | Restrict to one or more projects (comma-separated: `service-a,service-b`)         |
 | `--php-version`           | `COMPOSER_PHP_VERSION` | *(Docker PHP)* | PHP version for `composer update` — only if CI differs from Docker image          |
 | `--symfony=X.Y`           | —                      | —              | Symfony major migration shortcut (see above)                                      |
 | `--add-missing`           | —                      | off            | Add packages not yet in `composer.json` (upsert mode)                             |

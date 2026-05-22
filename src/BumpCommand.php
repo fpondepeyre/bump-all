@@ -37,7 +37,7 @@ class BumpCommand extends Command
         $this->addOption('group', 'g', InputOption::VALUE_OPTIONAL, 'GitLab group path or ID (or GITLAB_GROUP env var)');
         $this->addOption('gitlab-url', null, InputOption::VALUE_OPTIONAL, 'GitLab instance URL (or GITLAB_URL env var)');
         $this->addOption('base-branch', null, InputOption::VALUE_OPTIONAL, 'Base branch to update and target for the MR (or GITLAB_BASE_BRANCH env var, default: master)');
-        $this->addOption('project', null, InputOption::VALUE_OPTIONAL, 'Restrict to a single project name or path (useful for testing)');
+        $this->addOption('project', null, InputOption::VALUE_OPTIONAL, 'Restrict to one or more projects by name or path. Comma-separated for multiple (e.g. --project="service-search,service-payment").');
         $this->addOption('php-version', null, InputOption::VALUE_OPTIONAL, 'PHP version to use for dependency resolution — should match your CI (or COMPOSER_PHP_VERSION env var)');
         $this->addOption('add-missing', null, InputOption::VALUE_NONE, 'Also add packages that are not yet present in composer.json (upsert mode). Default: only update existing packages.');
         $this->addOption('with-all-dependencies', 'W', InputOption::VALUE_NONE, 'Pass --with-all-dependencies to composer update, allowing upgrades of transitive dependencies.');
@@ -56,6 +56,10 @@ class BumpCommand extends Command
         $gitlabUrl  = $input->getOption('gitlab-url')  ?: ($_ENV['GITLAB_URL']            ?? null);
         $baseBranch = $input->getOption('base-branch') ?: ($_ENV['GITLAB_BASE_BRANCH']    ?? 'master');
         $filterProject   = $input->getOption('project');
+        // Support comma-separated project names: --project="service-search,service-payment"
+        $filterProjects  = $filterProject !== null
+            ? array_filter(array_map('trim', explode(',', $filterProject)))
+            : [];
         $phpVersion      = $input->getOption('php-version') ?: ($_ENV['COMPOSER_PHP_VERSION'] ?? null);
         $addMissing      = $input->getOption('add-missing');
         $withAllDeps     = $input->getOption('with-all-dependencies');
@@ -141,8 +145,8 @@ class BumpCommand extends Command
             $packageSummary = implode(', ', array_map(fn($n, $v) => "$n:$v", array_keys($packages), $packages));
             $output->writeln("Packages: <info>$packageSummary</info>  (branch: <info>$baseBranch</info>)");
         }
-        if ($filterProject) {
-            $output->writeln("Filtering on project: <info>$filterProject</info>");
+        if (!empty($filterProjects)) {
+            $output->writeln("Filtering on project(s): <info>" . implode(', ', $filterProjects) . "</info>");
         }
         $output->writeln('');
 
@@ -174,7 +178,7 @@ class BumpCommand extends Command
                 $projectName = $project['name'];
                 $projectPath = $project['path'];
 
-                if ($filterProject !== null && $projectName !== $filterProject && $projectPath !== $filterProject) {
+                if (!empty($filterProjects) && !in_array($projectName, $filterProjects, true) && !in_array($projectPath, $filterProjects, true)) {
                     continue;
                 }
                 if ($selectedProjectIds !== null && !in_array($projectId, $selectedProjectIds, true)) {
