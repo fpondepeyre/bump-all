@@ -48,7 +48,7 @@ GITLAB_GROUP=my-company/my-team           # group path in GitLab (can be nested:
 GITLAB_URL=https://gitlab.com             # your GitLab instance URL
 GITLAB_BASE_BRANCH=main                   # branch to update and target for MRs
 COMPOSER_PHP_VERSION=8.3.0               # PHP version used in your CI/CD
-NO_SSL_VERIFY=false                       # set true for self-signed / internal CA certificates
+# NO_SSL_VERIFY=true                      # uncomment for self-signed / internal CA certificates
 ```
 
 > `.env` is git-ignored. Never commit it.
